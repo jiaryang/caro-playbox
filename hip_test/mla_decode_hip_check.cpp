@@ -1,14 +1,22 @@
-// mla_decode_hip_single.cpp（改用 HIP 實作 reference attention）
 #include <hip/hip_runtime.h>
-#include <hip/hip_bfloat16.h>
 #include <iostream>
 #include <vector>
-#include <chrono>
 #include <random>
 #include <cmath>
-#include <cstring>
+#include <numeric>
+#include <string>
 #include <cassert>
 
+#define CHECK_HIP(call) \
+    do { \
+        hipError_t err = call; \
+        if (err != hipSuccess) { \
+            std::cerr << "[HIP ERROR] " << #call << " failed: " << hipGetErrorString(err) << std::endl; \
+            return; \
+        } \
+    } while (0)
+
+// HIP kernel for QKV attention with sparse index indirection
 __global__ void mla_decode_hip_kernel(
     const float* __restrict__ q,
     const float* __restrict__ k,
@@ -24,67 +32,59 @@ __global__ void mla_decode_hip_kernel(
 
     int idx = b * H + h;
     const float* q_ptr = q + idx * D;
-    
-
-    printf("b = %d, h = %d, q[0] = %.6f\\n", b, h, q_ptr[0]);
-
     float* out_ptr = out + idx * D;
 
     int start = kv_indptr[b];
     int end = kv_indptr[b + 1];
     int len = end - start;
-    printf("start = %d, end = %d\\n", start, end);
 
     extern __shared__ float shared_mem[];
     float* scores = shared_mem;           // size: len
     float* acc = shared_mem + len;        // size: D
 
+    // Initialize shared memory safely
     for (int d = tid; d < D; d += blockDim.x)
         acc[d] = 0.0f;
+    if (tid == 0)
+        for (int i = 0; i < len; ++i)
+            scores[i] = 0.0f;
     __syncthreads();
 
     float e_max = -1e9f;
     for (int i = tid; i < len; i += blockDim.x) {
         int kv_idx = kv_indices[start + i];
-        const float* k_ptr = k + (kv_idx * H + h) * D;
-        printf("kv_idx=%d  k[%d]=%.6f  \\n", kv_idx, i, k_ptr[i]);
+        const float* k_ptr = k + kv_idx * D;
         float dot = 0.0f;
         for (int d = 0; d < D; ++d)
             dot += q_ptr[d] * k_ptr[d];
         scores[i] = dot;
         e_max = fmaxf(e_max, dot);
-        printf("scores[%d] = %f, \\n", i, scores[i]);
     }
     __syncthreads();
 
-    // Reduce max across threads
     __shared__ float block_max;
     if (tid == 0) {
         float local_max = scores[0];
         for (int i = 1; i < len; ++i)
             local_max = fmaxf(local_max, scores[i]);
         block_max = local_max;
-        printf("block_max = %f, \\n", block_max);
     }
     __syncthreads();
     e_max = block_max;
 
     __shared__ float e_sum_shared;
     if (tid == 0) e_sum_shared = 0.0f;
-        __syncthreads();
+    __syncthreads();
 
     for (int i = tid; i < len; i += blockDim.x) {
         float p = expf(scores[i] - e_max);
         atomicAdd(&e_sum_shared, p);
-        printf("e_sum_shared = %f, p[%d] = %f\\n", e_sum_shared, i, p);
 
         int kv_idx = kv_indices[start + i];
-        const float* v_ptr = v + (kv_idx * H + h) * D;
-        printf("kv_idx=%d  v[%d]=%.6f  \\n", kv_idx, i, v_ptr[i]);
+        const float* v_ptr = v + kv_idx * D;
         for (int d = 0; d < D; ++d) {
             float weighted = p * v_ptr[d];
             atomicAdd(&acc[d], weighted);
-            printf("acc[%d] = %f, \\n", d, acc[d]);
         }
     }
     __syncthreads();
@@ -94,138 +94,187 @@ __global__ void mla_decode_hip_kernel(
         out_ptr[d] = acc[d] / (e_sum + 1e-6f);
     }
 
-    if (tid == 0) {
-        printf("b=%d h=%d out=%.6f (acc=%.6f / sum=%.6f)\\n", b, h, out_ptr[0], acc[0], e_sum);
-    }
+    // Debug output for each block
+    //if (tid == 0) {
+    //    printf("[DEBUG] b=%d h=%d | out[0]=%.6f acc[0]=%.6f e_sum=%.6f\n", b, h, out_ptr[0], acc[0], e_sum);
+    //}
 }
 
-// ===================== Main ======================= //
-
-void init_kv_layout(int B, int P, int S,
-    std::vector<int>& h_indptr,
-    std::vector<int>& h_indices) {
-
-    h_indptr.resize(B + 1, 0);
-    h_indices.clear();
-
-    int kv_per_batch = P * S;
-    for (int b = 0; b < B; ++b) {
-        h_indptr[b + 1] = h_indptr[b] + kv_per_batch;
-        for (int i = 0; i < kv_per_batch; ++i) {
-            h_indices.push_back(b * kv_per_batch + i);
-        }
-    }
-    std::cout << "h_indptr = { ";
-    for (int i = 0; i < h_indptr.size(); ++i)
-        std::cout << h_indptr[i] << (i + 1 < h_indptr.size() ? ", " : " ");
-    std::cout << "}" << std::endl;
-    
-    std::cout << "h_indices = { ";
-    for (int i = 0; i < h_indices.size(); ++i)
-        std::cout << h_indices[i] << (i + 1 < h_indices.size() ? ", " : " ");
-    std::cout << "}" << std::endl;
-}
+struct TestCase {
+    int B, H, D, P, S, num_splits;
+    std::string name;
+};
 
 void initialize_qkv(std::vector<float>& q, std::vector<float>& k, std::vector<float>& v, bool use_random) {
     std::mt19937 rng(42);
     std::uniform_real_distribution<float> dist(0.f, 1.f);
-
-    for (int i = 0; i < q.size(); ++i) {
+    for (int i = 0; i < q.size(); ++i)
         q[i] = use_random ? dist(rng) : float(i + 1);
-        std::cout << "q[" << i <<"] = " << q[i] << "\n";
-    }
     for (int i = 0; i < k.size(); ++i) {
         k[i] = use_random ? dist(rng) : float(i + 1);
         v[i] = use_random ? dist(rng) : float(i + 1);
-        std::cout 
-            << "k[" << i <<"] = " << k[i]
-            << ", v[" << i <<"] = " << v[i] << "\n";
     }
 }
 
-int main() {
-    //const int B = 1, H = 1, D = 1, P = 1, S = 1, num_splits = 1;
-    //const int B = 1, H = 1, D = 1, P = 5, S = 1, num_splits = 1;
-    const int B = 2, H = 1, D = 1, P = 5, S = 1, num_splits = 1;
-    //const int B = 1, H = 1, D = 2, P = 3, S = 1, num_splits = 1;
-    //const int B = 1, H = 2, D = 1, P = 5, S = 1, num_splits = 1;
-    //const int B = 1, H = 1, D = 1, P = 8, S = 1, num_splits = 2;
+void init_kv_layout(int B, int P, int S, std::vector<int>& h_indptr, std::vector<int>& h_indices) {
+    h_indptr.resize(B + 1, 0);
+    h_indices.clear();
+    int kv_per_batch = P * S;
+    for (int b = 0; b < B; ++b) {
+        h_indptr[b + 1] = h_indptr[b] + kv_per_batch;
+        for (int i = 0; i < kv_per_batch; ++i)
+            h_indices.push_back(b * kv_per_batch + i);
+    }
+}
 
-    using scalar_t = float;
+bool check_allclose_cpu_vs_gpu(const std::vector<float>& ref,
+                               const std::vector<float>& out,
+                               float rtol = 1e-2f, float atol = 1e-2f,
+                               const std::string& name = "checkAllclose",
+                               int printNum = 8) {
+    assert(ref.size() == out.size());
+    int numel = ref.size();
+    int mismatch_count = 0;
+    float max_delta = 0.0f;
+    std::vector<int> mismatch_indices;
+
+    for (int i = 0; i < numel; ++i) {
+        float diff = std::abs(ref[i] - out[i]);
+        float tol = atol + rtol * std::abs(ref[i]);
+        if (diff > tol) {
+            mismatch_count++;
+            if (mismatch_indices.size() < (size_t)printNum)
+                mismatch_indices.push_back(i);
+            max_delta = std::max(max_delta, diff);
+        }
+    }
+
+    if (mismatch_count == 0) {
+        std::cout << name << " [PASSED] Allclose passed. (rtol=" << rtol << ", atol=" << atol << ")\n";
+        return true;
+    }
+
+    float percent = float(mismatch_count) / numel * 100.0f;
+    std::cout << name << " [FAILED] " << mismatch_count << " / " << numel
+              << " (" << percent << "%) elements mismatch\n";
+    std::cout << "Max delta = " << max_delta << "\n";
+
+    for (int i = 0; i < mismatch_indices.size(); ++i) {
+        int idx = mismatch_indices[i];
+        std::cout << "  idx=" << idx
+                  << "  ref=" << ref[idx]
+                  << "  out=" << out[idx]
+                  << "  delta=" << std::abs(ref[idx] - out[idx]) << "\n";
+    }
+    return false;
+}
+
+void run_test(const TestCase& tc) {
+    int B = tc.B, H = tc.H, D = tc.D, P = tc.P, S = tc.S, num_splits = tc.num_splits;
+    std::cout << "\n========== Running Test: " << tc.name << " ==========" << std::endl;
 
     size_t size_q = B * H * D;
-    size_t size_k = P * S * H * D;
-    size_t size_v = P * S * H * D;
+    size_t size_k = B * P * S * H * D;
+    size_t size_v = size_k;
     size_t size_out = size_q;
-    size_t size_lse = B * H * num_splits;
     size_t size_indptr = B + 1;
 
-    std::vector<scalar_t> h_q(size_q), h_k(size_k), h_v(size_v);
-    std::vector<scalar_t> h_out(size_out);
-    std::vector<float> h_lse(size_lse);
-    std::vector<scalar_t> h_ref(size_out);
-    std::vector<int> h_indptr(size_indptr, 0);
-    std::vector<int> h_indices;
-    std::iota(h_indices.begin(), h_indices.end(), 0);
-    std::vector<int> h_lastpage = {S, S};
+    std::vector<float> h_q(size_q), h_k(size_k), h_v(size_v), h_out(size_out), h_ref(size_out);
+    std::vector<int> h_indptr(size_indptr), h_indices;
+    std::vector<int> h_lastpage(B, S);
 
-    const bool use_random = false;
-    initialize_qkv(h_q, h_k, h_v, use_random);
+    initialize_qkv(h_q, h_k, h_v, true);
     init_kv_layout(B, P, S, h_indptr, h_indices);
     int size_indices = h_indices.size();
 
     float *d_q, *d_k, *d_v, *d_out;
-    hipMalloc(&d_q, size_q * sizeof(scalar_t));
-    hipMalloc(&d_k, size_k * sizeof(scalar_t));
-    hipMalloc(&d_v, size_v * sizeof(scalar_t));
-    hipMalloc(&d_out, size_out * sizeof(scalar_t));
-    
     int *d_indptr, *d_indices;
-    hipMalloc(&d_indptr, size_indptr * sizeof(int));
-    hipMalloc(&d_indices, size_indices * sizeof(int));
+    CHECK_HIP(hipMalloc(&d_q, size_q * sizeof(float)));
+    CHECK_HIP(hipMalloc(&d_k, size_k * sizeof(float)));
+    CHECK_HIP(hipMalloc(&d_v, size_v * sizeof(float)));
+    CHECK_HIP(hipMalloc(&d_out, size_out * sizeof(float)));
+    CHECK_HIP(hipMalloc(&d_indptr, size_indptr * sizeof(int)));
+    CHECK_HIP(hipMalloc(&d_indices, size_indices * sizeof(int)));
 
-    float *d_lse;
-    int *d_lastpage;
-    hipMalloc(&d_lse, size_lse * sizeof(float));
-    hipMalloc(&d_lastpage, B * sizeof(int));
+    CHECK_HIP(hipMemcpy(d_q, h_q.data(), size_q * sizeof(float), hipMemcpyHostToDevice));
+    CHECK_HIP(hipMemcpy(d_k, h_k.data(), size_k * sizeof(float), hipMemcpyHostToDevice));
+    CHECK_HIP(hipMemcpy(d_v, h_v.data(), size_v * sizeof(float), hipMemcpyHostToDevice));
+    CHECK_HIP(hipMemcpy(d_indptr, h_indptr.data(), size_indptr * sizeof(int), hipMemcpyHostToDevice));
+    CHECK_HIP(hipMemcpy(d_indices, h_indices.data(), size_indices * sizeof(int), hipMemcpyHostToDevice));
 
-    hipMemcpy(d_q, h_q.data(), size_q * sizeof(scalar_t), hipMemcpyHostToDevice);
-    hipMemcpy(d_k, h_k.data(), size_k * sizeof(scalar_t), hipMemcpyHostToDevice);
-    hipMemcpy(d_v, h_v.data(), size_v * sizeof(scalar_t), hipMemcpyHostToDevice);
-    hipMemcpy(d_indptr, h_indptr.data(), size_indptr * sizeof(int), hipMemcpyHostToDevice);
-    hipMemcpy(d_indices, h_indices.data(), size_indices * sizeof(int), hipMemcpyHostToDevice);
-    hipMemcpy(d_lastpage, h_lastpage.data(), B * sizeof(int), hipMemcpyHostToDevice);
-
-    float scale = 1.0f / std::sqrt((float)D);
-    int stride_qh = D, stride_kbs = S * H * D, stride_kh = D;
-    int stride_vbs = stride_kbs, stride_vh = D;
-
-    size_t shared_size = (P + D) * sizeof(float);  // scores + acc
     dim3 grid(B, H);
-    dim3 block(std::max(P, D));
+    dim3 block(std::max(P * S, D));
+    size_t shared_size = (P * S + D) * sizeof(float);
 
-    auto start = std::chrono::high_resolution_clock::now();
     hipLaunchKernelGGL(mla_decode_hip_kernel, grid, block, shared_size, 0,
-        d_q, d_k, d_v, d_out,
-        d_indptr, d_indices,
-        D, H, B);
-    hipDeviceSynchronize();
-    auto end = std::chrono::high_resolution_clock::now();
-    auto dur = std::chrono::duration<double, std::micro>(end - start).count();
+        d_q, d_k, d_v, d_out, d_indptr, d_indices, D, H, B);
+    CHECK_HIP(hipDeviceSynchronize());
 
-    hipMemcpy(h_out.data(), d_out, size_out * sizeof(scalar_t), hipMemcpyDeviceToHost);
-    hipMemcpy(h_lse.data(), d_lse, size_lse * sizeof(float), hipMemcpyDeviceToHost);
+    CHECK_HIP(hipMemcpy(h_out.data(), d_out, size_out * sizeof(float), hipMemcpyDeviceToHost));
 
-    for (int i = 0; i < size_out; ++i) {
-        float test_val = h_out[i];
-        std::cout << "i=" << i
-              << "  out=" << test_val
-              << std::endl;
+    // Host-side reference computation for verification
+    for (int b = 0; b < B; ++b) {
+        for (int h = 0; h < H; ++h) {
+            int idx = b * H + h;
+            const float* q_ptr = h_q.data() + idx * D;
+            float* ref_ptr = h_ref.data() + idx * D;
+            std::fill(ref_ptr, ref_ptr + D, 0.0f);
+
+            int start = h_indptr[b];
+            int end = h_indptr[b + 1];
+            int len = end - start;
+
+            std::vector<float> scores(len);
+            float e_max = -1e9f;
+            for (int i = 0; i < len; ++i) {
+                int kv_idx = h_indices[start + i];
+                const float* k_ptr = h_k.data() + kv_idx * D;
+                float dot = 0.0f;
+                for (int d = 0; d < D; ++d)
+                    dot += q_ptr[d] * k_ptr[d];
+                scores[i] = dot;
+                e_max = std::max(e_max, dot);
+            }
+
+            float e_sum = 0.0f;
+            std::vector<float> probs(len);
+            for (int i = 0; i < len; ++i) {
+                probs[i] = std::exp(scores[i] - e_max);
+                e_sum += probs[i];
+            }
+
+            for (int i = 0; i < len; ++i) {
+                float p = probs[i] / (e_sum + 1e-6f);
+                int kv_idx = h_indices[start + i];
+                const float* v_ptr = h_v.data() + kv_idx * D;
+                for (int d = 0; d < D; ++d)
+                    ref_ptr[d] += p * v_ptr[d];
+            }
+        }
     }
 
-    std::cout << "HIP MLA time (us): " << dur << "\n";
+    check_allclose_cpu_vs_gpu(h_ref, h_out, 1e-2f, 1e-2f, tc.name);
 
-    hipFree(d_q); hipFree(d_k); hipFree(d_v);hipFree(d_out);
-    hipFree(d_indptr); hipFree(d_indices);
+    CHECK_HIP(hipFree(d_q); hipFree(d_k); hipFree(d_v); hipFree(d_out));
+    CHECK_HIP(hipFree(d_indptr); hipFree(d_indices));
+}
+
+int main() {
+    std::vector<TestCase> test_cases = {
+        {1, 1, 1, 1, 1, 1, "B1_H1_D1_P1_S1"},
+        {1, 1, 1, 5, 1, 1, "B1_H1_D1_P5_S1"},
+        {2, 1, 1, 5, 1, 1, "B2_H1_D1_P5_S1"},
+        {1, 1, 2, 3, 1, 1, "B1_H1_D2_P3_S1"},
+        {1, 2, 1, 5, 1, 1, "B1_H2_D1_P5_S1"},
+        {1, 1, 1, 8, 1, 2, "B1_H1_D1_P8_S1_split2"},
+        {256, 16, 576, 1, 1, 1, "B256_H16_D576_P1_S1"},
+        {256, 16, 576, 2, 1, 1, "B256_H16_D576_P2_S1"},
+        {256, 16, 576, 8, 1, 1, "B256_H16_D576_P8_S1"},
+        {256, 16, 576, 16, 1, 1, "B256_H16_D576_P16_S1"}
+    };
+
+    for (const auto& tc : test_cases)
+        run_test(tc);
+
     return 0;
 }
