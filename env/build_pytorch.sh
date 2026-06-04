@@ -1,15 +1,18 @@
-rm -rf build
-rm -rf torch.egg-info
-rm -f compile_commands.json
+#!/usr/bin/env bash
+set -euo pipefail
 
-export ROCM_DEVEL=/home/jiaryang/miniconda3/envs/py_3.11/lib/python3.11/site-packages/_rocm_sdk_devel
-export ROCM_CORE=/home/jiaryang/miniconda3/envs/py_3.11/lib/python3.11/site-packages/_rocm_sdk_core
+CONDA_DIR="${CONDA_DIR:-$HOME/miniconda3}"
+ENV_NAME="${CONDA_ENV_NAME:-py_3.11}"
+PYTHON_VERSION="${PYTHON_VERSION:-3.11}"
+
+SITE_PACKAGES="${CONDA_DIR}/envs/${ENV_NAME}/lib/python${PYTHON_VERSION}/site-packages"
+export ROCM_DEVEL="${SITE_PACKAGES}/_rocm_sdk_devel"
+export ROCM_CORE="${SITE_PACKAGES}/_rocm_sdk_core"
 
 export ROCM_PATH="$ROCM_DEVEL"
 export HIP_PATH="$ROCM_DEVEL"
 export ROCM_SOURCE_DIR="$ROCM_DEVEL"
-export ROCM_CORE="$ROCM_CORE"
-                                                                                                                                                        export HIP_CLANG_PATH="$ROCM_CORE/lib/llvm/bin"
+export HIP_CLANG_PATH="$ROCM_CORE/lib/llvm/bin"
 export HIP_HIPCONFIG_EXECUTABLE="$ROCM_DEVEL/bin/hipconfig"
 export HIP_ROOT_DIR="$ROCM_DEVEL"
 
@@ -21,12 +24,23 @@ export CMAKE_PREFIX_PATH="$ROCM_DEVEL:$ROCM_CORE${CMAKE_PREFIX_PATH:+:$CMAKE_PRE
 export CC=/usr/bin/clang
 export CXX=/usr/bin/clang++
 export USE_ROCM=1
-export PYTORCH_ROCM_ARCH=gfx942                                                                                                                      export CMAKE_FRESH=1
+export CMAKE_FRESH=1
 
+if rocminfo 2>/dev/null | grep -qi 'gfx950'; then
+  export PYTORCH_ROCM_ARCH=gfx950
+else
+  export PYTORCH_ROCM_ARCH=gfx942
+fi
+
+rm -rf build
+rm -rf torch.egg-info
+rm -f compile_commands.json
 
 git config --global --add safe.directory ~/pytorch-main/pytorch && \
     git submodule sync && \
-    git submodule update --init --recursive  --progress && \
+    git submodule update --init --recursive --progress && \
     python tools/amd_build/build_amd.py
 
-MAX_JOBS=$(nproc) PYTORCH_ROCM_ARCH="gfx942"  USE_MKLDNN=0 USE_ROCM=1  USE_AOTRITON=0   BUILD_TEST=0 CMAKE_PREFIX_PATH=$(python -c 'import sys; print(f"{sys.prefix}")')  python -m pip install --no-build-isolation -v -e . 2>&1 | tee build.log
+MAX_JOBS=$(nproc) USE_MKLDNN=0 USE_ROCM=1 USE_AOTRITON=0 BUILD_TEST=0 \
+  CMAKE_PREFIX_PATH="$(python -c 'import sys; print(f"{sys.prefix}")')" \
+  python -m pip install --no-build-isolation -v -e . 2>&1 | tee build.log
