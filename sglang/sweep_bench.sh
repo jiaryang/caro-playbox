@@ -59,7 +59,17 @@ case "$MODEL_KEY" in
 esac
 # Allow a hard override of the resolved model path.
 MODEL="${MODEL_OVERRIDE:-$MODEL}"
+
+# GPUs used by the serving deployment (for per-GPU throughput in summary).
+# Override with:  NUM_GPUS=8 bash sweep_bench.sh
+# If unset, summary falls back to server_info.tp_size from each JSONL result.
+case "$MODEL_KEY" in
+  glm)  NUM_GPUS="${NUM_GPUS:-4}" ;;
+  *)    NUM_GPUS="${NUM_GPUS:-}" ;;
+esac
+
 echo "Model: $MODEL  (MODEL_KEY=$MODEL_KEY, GPU_VENDOR=$GPU_VENDOR)"
+[[ -n "${NUM_GPUS:-}" ]] && echo "Num GPUs (TP): $NUM_GPUS"
 
 # ---- Node / GPU detection ---------------------------------------------------
 # NODE can be overridden:  NODE=my-host bash sweep_bench.sh
@@ -103,8 +113,10 @@ echo "Node: $NODE  GPU: $GPU  (detected: ${GPU_RAW:-none})"
 
 # input:output pairs to sweep (output len is per pair).
 IO_PAIRS=("8192:1024" "70000:300")
+#IO_PAIRS=("8192:1024")
 
 CONCURRENCIES=(4 8 16 32 64)
+#CONCURRENCIES=(4 64)
 
 RANGE_RATIO=0.8
 # num-prompts = max-concurrency * this multiplier
@@ -155,7 +167,7 @@ done
 
 echo
 echo "All runs done. Summarizing -> ${RESULT_DIR}/summary.txt"
-python3 - "$RESULT_DIR" "$TAG" "$MODEL" "$NODE" "$GPU" <<'PY' | tee "${RESULT_DIR}/summary.txt"
+python3 - "$RESULT_DIR" "$TAG" "$MODEL" "$NODE" "$GPU" "${NUM_GPUS:-}" <<'PY' | tee "${RESULT_DIR}/summary.txt"
 import glob, json, os, sys
 
 result_dir = sys.argv[1]
@@ -163,8 +175,20 @@ prefix = sys.argv[2]
 model = sys.argv[3]
 node = sys.argv[4]
 gpu = sys.argv[5]
+default_num_gpus = int(sys.argv[6]) if len(sys.argv) > 6 and sys.argv[6] else None
+
+def num_gpus_for(d):
+    tp = d.get("server_info", {}).get("tp_size")
+    if tp:
+        return int(tp)
+    if default_num_gpus:
+        return default_num_gpus
+    return 1
+
 print(f"Model: {model}")
 print(f"Node:  {node}    GPU: {gpu}")
+if default_num_gpus:
+    print(f"Num GPUs (TP, default): {default_num_gpus}")
 print()
 rows = []
 for path in glob.glob(os.path.join(result_dir, f"{prefix}_*.jsonl")):
@@ -186,10 +210,11 @@ rows.sort(key=lambda d: (d.get("random_input_len", 0), d.get("max_concurrency", 
 #   TTFT          -> median time-to-first-token (ms)
 #   TPOT          -> median time-per-output-token (ms)
 #   out_tok/s     -> output throughput (tokens/s, aggregate)
+#   tot/gpu       -> total token throughput (tok/s) / num_gpus
 #   interactivity -> 1000 / median TPOT (tokens/s per request)
 hdr = (
     f"{'input':>8} {'conc':>4} {'act_conc':>8} "
-    f"{'TTFT_ms':>10} {'TPOT_ms':>9} {'out_tok/s':>10} {'interact':>9}"
+    f"{'TTFT_ms':>10} {'TPOT_ms':>9} {'out_tok/s':>10} {'tot/gpu':>10} {'interact':>9}"
 )
 print(hdr)
 print("-" * len(hdr))
@@ -198,6 +223,9 @@ table = []
 for d in rows:
     tpot = d.get("median_tpot_ms", 0) or 0
     interactivity = 1000.0 / tpot if tpot else 0.0
+    num_gpus = num_gpus_for(d)
+    total_tput = d.get("total_throughput", 0) or 0
+    total_per_gpu = total_tput / num_gpus if num_gpus else 0.0
     print(
         f"{d.get('random_input_len',0):>8} "
         f"{d.get('max_concurrency',0):>4} "
@@ -205,6 +233,7 @@ for d in rows:
         f"{d.get('median_ttft_ms',0):>10.1f} "
         f"{tpot:>9.3f} "
         f"{d.get('output_throughput',0):>10.2f} "
+        f"{total_per_gpu:>10.2f} "
         f"{interactivity:>9.2f}"
     )
     table.append(
@@ -215,11 +244,12 @@ for d in rows:
             "TTFT_median_ms": round(d.get("median_ttft_ms", 0), 1),
             "TPOT_median_ms": round(tpot, 3),
             "output_tok_per_s": round(d.get("output_throughput", 0), 2),
+            "total_tok_per_gpu": round(total_per_gpu, 2),
             "interactivity_tok_per_s": round(interactivity, 2),
         }
     )
 
-# Build per-input-length summaries: rows = max_concurrency, cols = 4 metrics.
+# Build per-input-length summaries: rows = max_concurrency, cols = metrics.
 import pandas as pd
 
 df = pd.DataFrame(table)
@@ -228,6 +258,7 @@ METRIC_COLS = [
     "TTFT_median_ms",
     "TPOT_median_ms",
     "output_tok_per_s",
+    "total_tok_per_gpu",
     "interactivity_tok_per_s",
 ]
 
