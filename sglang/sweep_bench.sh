@@ -25,9 +25,11 @@ detect_gpu_vendor() {
 }
 GPU_VENDOR="${GPU_VENDOR:-$(detect_gpu_vendor)}"
 
-# qwen uses vendor-specific quantized weights: MXFP4 on AMD, NVFP4 on CUDA.
+# qwen/glm use vendor-specific quantized weights: MXFP4 on AMD, NVFP4 on CUDA.
 QWEN_MODEL_AMD="${QWEN_MODEL_AMD:-amd/Qwen3.5-397B-A17B-MXFP4}"
 QWEN_MODEL_CUDA="${QWEN_MODEL_CUDA:-nvidia/Qwen3.5-397B-A17B-NVFP4}"
+GLM_MODEL_AMD="${GLM_MODEL_AMD:-amd/GLM-5.2-MXFP4}"
+GLM_MODEL_CUDA="${GLM_MODEL_CUDA:-nvidia/GLM-5.2-NVFP4}"
 
 case "$MODEL_KEY" in
   qwen)
@@ -42,7 +44,17 @@ case "$MODEL_KEY" in
     esac
     TAG="qwen" ;;
   dsv4) MODEL="sgl-project/DeepSeek-V4-Flash-FP8";  TAG="dsv4" ;;
-  glm)  MODEL="zai-org/GLM-5.2-FP8";                TAG="glm"  ;;
+  glm)
+    case "$GPU_VENDOR" in
+      cuda) MODEL="$GLM_MODEL_CUDA" ;;
+      amd)  MODEL="$GLM_MODEL_AMD" ;;
+      *)
+        echo "ERROR: MODEL_KEY=glm needs a known GPU vendor, but detection failed." >&2
+        echo "       Set it explicitly, e.g. GPU_VENDOR=amd bash sweep_bench.sh" >&2
+        exit 1
+        ;;
+    esac
+    TAG="glm" ;;
   *)    echo "Unknown MODEL_KEY: '$MODEL_KEY' (expected: qwen | dsv4 | glm)" >&2; exit 1 ;;
 esac
 # Allow a hard override of the resolved model path.
@@ -90,14 +102,13 @@ GPU="${GPU:-$(normalize_gpu "$GPU_RAW")}"
 echo "Node: $NODE  GPU: $GPU  (detected: ${GPU_RAW:-none})"
 
 # input:output pairs to sweep (output len is per pair).
-#   8192/1024  and  71680/500
-IO_PAIRS=("8192:1024" "71680:500")
+IO_PAIRS=("8192:1024" "70000:300")
 
-CONCURRENCIES=(4 8 16 32 64 128)
+CONCURRENCIES=(4 8 16 32 64)
 
 RANGE_RATIO=0.8
 # num-prompts = max-concurrency * this multiplier
-PROMPTS_PER_CONC=10
+PROMPTS_PER_CONC=5
 
 # Where to put per-run logs and JSONL results.
 RESULT_DIR="sweep_${MODEL_KEY}_${GPU}_${NODE}_$(date +%Y%m%d_%H%M%S)"
