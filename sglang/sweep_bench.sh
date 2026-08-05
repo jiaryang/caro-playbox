@@ -1,308 +1,252 @@
 #!/usr/bin/env bash
 #
-# Sweep sglang bench_serving over input lengths x max-concurrency.
+# SGLang benchmark runner — perf sweep and GSM8K accuracy in one script.
+# Pick one mode via --mode; perf and acc configs are independent.
 #
-# Edit the variables below, then run:
-#   bash sweep_bench.sh
+# Usage:
+#   bash sweep_bench.sh --model-key glm              # perf (default mode)
+#   bash sweep_bench.sh --model-key glm --mode acc   # GSM8K x3 by default
+#   bash perf_bench.sh --model-key glm               # same as --mode perf
+#   bash acc_bench.sh  --model-key glm               # same as --mode acc
 #
 set -euo pipefail
 
-# ---- Config -----------------------------------------------------------------
-# Choose which model to benchmark. Set MODEL_KEY to one of: qwen | dsv4 | glm
-# (e.g.  MODEL_KEY=dsv4 bash sweep_bench.sh), or override MODEL directly.
-MODEL_KEY="${MODEL_KEY:-qwen}"
+if [[ -z "${BASH_VERSION:-}" ]]; then
+  echo "ERROR: run with bash, not sh:  bash $0 ..." >&2
+  exit 1
+fi
 
-# Detect GPU vendor (cuda | amd) so vendor-specific weights can be selected.
-# Override with:  GPU_VENDOR=amd bash sweep_bench.sh
-detect_gpu_vendor() {
-  if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
-    echo cuda
-  elif command -v rocm-smi >/dev/null 2>&1 || command -v amd-smi >/dev/null 2>&1 || [ -e /dev/kfd ]; then
-    echo amd
-  else
-    echo unknown
-  fi
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/bench_common.sh"
+bench_common_init
+
+SUMMARIZE_PERF="${BENCH_SCRIPT_DIR}/summarize_perf.py"
+SUMMARIZE_ACC="${BENCH_SCRIPT_DIR}/summarize_acc.py"
+
+usage() {
+  cat <<'EOF'
+Usage: sweep_bench.sh --model-key KEY [options]
+
+Shared:
+  --model-key KEY          qwen | dsv4 | glm  (required)
+  --mode MODE              perf (throughput sweep) or acc (GSM8K accuracy)  (default: perf)
+  --model-override PATH    override resolved model path
+  --gpu-vendor VENDOR      cuda | amd  (default: auto-detect)
+  --gpu TAG                short GPU tag, e.g. mi355  (default: auto-detect)
+  --node NAME              node name tag  (default: hostname)
+  --num-gpus N             TP size for per-GPU throughput in summary
+  --sglang-root PATH       sglang checkout  (default: ../../sglang)
+
+Perf (--mode perf):
+  --perf-io-pairs PAIRS    comma-separated input:output pairs  (default: 70000:300)
+  --perf-concurrencies N   comma-separated max-concurrency values  (default: 4,8,16,32,64)
+  --perf-range-ratio F     random length range ratio  (default: 0.8)
+  --perf-prompts-per-conc N  num-prompts = concurrency * N  (default: 5)
+  --perf-result-dir PATH   output directory  (default: perf_<model>_<gpu>_<node>_<ts>)
+
+Accuracy (--mode acc):
+  --acc-num-questions N    (default: 2000)
+  --acc-parallel N         (default: 64)
+  --acc-num-shots N        (default: 5)
+  --acc-host HOST          server host  (default: 127.0.0.1)
+  --acc-port PORT          server port  (default: 30000)
+  --acc-runs N             repeat GSM8K eval N times  (default: 3)
+  --acc-result-dir PATH    output directory  (default: acc_<model>_<gpu>_<node>_<ts>)
+
+  -h, --help               show this help
+EOF
 }
-GPU_VENDOR="${GPU_VENDOR:-$(detect_gpu_vendor)}"
 
-# qwen/glm use vendor-specific quantized weights: MXFP4 on AMD, NVFP4 on CUDA.
-QWEN_MODEL_AMD="${QWEN_MODEL_AMD:-amd/Qwen3.5-397B-A17B-MXFP4}"
-QWEN_MODEL_CUDA="${QWEN_MODEL_CUDA:-nvidia/Qwen3.5-397B-A17B-NVFP4}"
-GLM_MODEL_AMD="${GLM_MODEL_AMD:-amd/GLM-5.2-MXFP4}"
-GLM_MODEL_CUDA="${GLM_MODEL_CUDA:-nvidia/GLM-5.2-NVFP4}"
+# ---- Defaults (overridden by CLI flags) ------------------------------------
+BENCH_MODE="perf"
+MODEL_KEY=""
+MODEL_OVERRIDE=""
+GPU_VENDOR=""
+GPU=""
+NODE=""
+NUM_GPUS=""
+SGLANG_ROOT="${SGLANG_ROOT:-$(cd "$BENCH_SCRIPT_DIR/../../sglang" 2>/dev/null && pwd)}"
 
-case "$MODEL_KEY" in
-  qwen)
-    case "$GPU_VENDOR" in
-      cuda) MODEL="$QWEN_MODEL_CUDA" ;;
-      amd)  MODEL="$QWEN_MODEL_AMD" ;;
-      *)
-        echo "ERROR: MODEL_KEY=qwen needs a known GPU vendor, but detection failed." >&2
-        echo "       Set it explicitly, e.g. GPU_VENDOR=cuda bash sweep_bench.sh" >&2
-        exit 1
-        ;;
-    esac
-    TAG="qwen" ;;
-  dsv4) MODEL="sgl-project/DeepSeek-V4-Flash-FP8";  TAG="dsv4" ;;
-  glm)
-    case "$GPU_VENDOR" in
-      cuda) MODEL="$GLM_MODEL_CUDA" ;;
-      amd)  MODEL="$GLM_MODEL_AMD" ;;
-      *)
-        echo "ERROR: MODEL_KEY=glm needs a known GPU vendor, but detection failed." >&2
-        echo "       Set it explicitly, e.g. GPU_VENDOR=amd bash sweep_bench.sh" >&2
-        exit 1
-        ;;
-    esac
-    TAG="glm" ;;
-  *)    echo "Unknown MODEL_KEY: '$MODEL_KEY' (expected: qwen | dsv4 | glm)" >&2; exit 1 ;;
-esac
-# Allow a hard override of the resolved model path.
-MODEL="${MODEL_OVERRIDE:-$MODEL}"
+PERF_IO_PAIRS_STR="70000:300"
+PERF_CONCURRENCIES_STR="4,8,16,32,64"
+PERF_RANGE_RATIO="0.8"
+PERF_PROMPTS_PER_CONC="5"
+PERF_RESULT_DIR=""
 
-# GPUs used by the serving deployment (for per-GPU throughput in summary).
-# Override with:  NUM_GPUS=8 bash sweep_bench.sh
-# If unset, summary falls back to server_info.tp_size from each JSONL result.
-case "$MODEL_KEY" in
-  glm)  NUM_GPUS="${NUM_GPUS:-4}" ;;
-  *)    NUM_GPUS="${NUM_GPUS:-}" ;;
-esac
+ACC_NUM_QUESTIONS="2000"
+ACC_PARALLEL="64"
+ACC_NUM_SHOTS="5"
+ACC_HOST="127.0.0.1"
+ACC_PORT="30000"
+ACC_RUNS="3"
+ACC_RESULT_DIR=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --mode)              BENCH_MODE="$2"; shift 2 ;;
+    --model-key)         MODEL_KEY="$2"; shift 2 ;;
+    --model-override)    MODEL_OVERRIDE="$2"; shift 2 ;;
+    --gpu-vendor)        GPU_VENDOR="$2"; shift 2 ;;
+    --gpu)               GPU="$2"; shift 2 ;;
+    --node)              NODE="$2"; shift 2 ;;
+    --num-gpus)          NUM_GPUS="$2"; shift 2 ;;
+    --sglang-root)       SGLANG_ROOT="$2"; shift 2 ;;
+    --perf-io-pairs)     PERF_IO_PAIRS_STR="$2"; shift 2 ;;
+    --perf-concurrencies) PERF_CONCURRENCIES_STR="$2"; shift 2 ;;
+    --perf-range-ratio)  PERF_RANGE_RATIO="$2"; shift 2 ;;
+    --perf-prompts-per-conc) PERF_PROMPTS_PER_CONC="$2"; shift 2 ;;
+    --perf-result-dir)   PERF_RESULT_DIR="$2"; shift 2 ;;
+    --acc-num-questions) ACC_NUM_QUESTIONS="$2"; shift 2 ;;
+    --acc-parallel)      ACC_PARALLEL="$2"; shift 2 ;;
+    --acc-num-shots)     ACC_NUM_SHOTS="$2"; shift 2 ;;
+    --acc-host)          ACC_HOST="$2"; shift 2 ;;
+    --acc-port)          ACC_PORT="$2"; shift 2 ;;
+    --acc-runs)          ACC_RUNS="$2"; shift 2 ;;
+    --acc-result-dir)    ACC_RESULT_DIR="$2"; shift 2 ;;
+    -h|--help)           usage; exit 0 ;;
+    *)
+      echo "ERROR: unknown argument: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
+
+if [[ -z "$MODEL_KEY" ]]; then
+  echo "ERROR: --model-key is required (qwen | dsv4 | glm)" >&2
+  usage >&2
+  exit 1
+fi
+
+if ! [[ "$ACC_RUNS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "ERROR: --acc-runs must be a positive integer (got: '$ACC_RUNS')" >&2
+  exit 1
+fi
+
+if [[ -z "$GPU_VENDOR" ]]; then
+  GPU_VENDOR="$(detect_gpu_vendor)"
+fi
+
+bench_resolve_model
+bench_detect_node_gpu
+
+IFS=',' read -ra _perf_io_raw <<< "$PERF_IO_PAIRS_STR"
+PERF_IO_PAIRS=("${_perf_io_raw[@]}")
+
+IFS=',' read -ra PERF_CONCURRENCIES <<< "$PERF_CONCURRENCIES_STR"
+
+_ts="$(date +%Y%m%d_%H%M%S)"
+PERF_RESULT_DIR="${PERF_RESULT_DIR:-perf_${MODEL_KEY}_${GPU}_${NODE}_${_ts}}"
+ACC_RESULT_DIR="${ACC_RESULT_DIR:-acc_${MODEL_KEY}_${GPU}_${NODE}_${_ts}}"
 
 echo "Model: $MODEL  (MODEL_KEY=$MODEL_KEY, GPU_VENDOR=$GPU_VENDOR)"
 [[ -n "${NUM_GPUS:-}" ]] && echo "Num GPUs (TP): $NUM_GPUS"
-
-# ---- Node / GPU detection ---------------------------------------------------
-# NODE can be overridden:  NODE=my-host bash sweep_bench.sh
-NODE="${NODE:-$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo unknown-node)}"
-
-# Detect the raw GPU model string (NVIDIA via nvidia-smi, AMD via rocm-smi/rocminfo).
-detect_gpu_raw() {
-  local name=""
-  if command -v nvidia-smi >/dev/null 2>&1; then
-    name="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -n1)"
-  fi
-  if [[ -z "$name" ]] && command -v rocm-smi >/dev/null 2>&1; then
-    name="$(rocm-smi --showproductname 2>/dev/null | grep -ioE 'MI[0-9]+[A-Z]*' | head -n1)"
-  fi
-  if [[ -z "$name" ]] && command -v rocminfo >/dev/null 2>&1; then
-    name="$(rocminfo 2>/dev/null | grep -ioE 'MI[0-9]+[A-Z]*' | head -n1)"
-  fi
-  echo "$name"
-}
-
-# Normalize the raw string to a short tag (mi355 | mi325 | mi300 | b200 | h200 | h100 ...).
-normalize_gpu() {
-  local s
-  s="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
-  case "$s" in
-    *mi355*) echo "mi355" ;;
-    *mi325*) echo "mi325" ;;
-    *mi300*) echo "mi300" ;;
-    *b200*)  echo "b200"  ;;
-    *h200*)  echo "h200"  ;;
-    *h100*)  echo "h100"  ;;
-    "")      echo "unknown-gpu" ;;
-    *)       echo "${s// /_}" ;;  # fallback: raw name, spaces -> underscores
-  esac
-}
-
-GPU_RAW="$(detect_gpu_raw)"
-# GPU can be overridden:  GPU=mi355 bash sweep_bench.sh
-GPU="${GPU:-$(normalize_gpu "$GPU_RAW")}"
 echo "Node: $NODE  GPU: $GPU  (detected: ${GPU_RAW:-none})"
+echo "Mode: $BENCH_MODE"
 
-# input:output pairs to sweep (output len is per pair).
-IO_PAIRS=("8192:1024" "70000:300")
-#IO_PAIRS=("8192:1024")
+run_perf_sweep() {
+  local result_dir="$PERF_RESULT_DIR"
+  mkdir -p "$result_dir"
+  result_dir="$(cd "$result_dir" && pwd)"
+  echo "Writing perf results to: $result_dir"
 
-CONCURRENCIES=(4 8 16 32 64)
-#CONCURRENCIES=(4 64)
+  run_one() {
+    local ilen=$1 olen=$2 conc=$3
+    local nprompts=$((conc * PERF_PROMPTS_PER_CONC))
+    local tag="${ilen}_o${olen}_c${conc}"
+    local jsonl="${result_dir}/${TAG}_${tag}.jsonl"
+    local log="${result_dir}/${TAG}_${tag}.log"
 
-RANGE_RATIO=0.8
-# num-prompts = max-concurrency * this multiplier
-PROMPTS_PER_CONC=5
+    echo
+    echo "==================================================================="
+    echo ">>> input_len=${ilen}  output_len=${olen}  max_concurrency=${conc}  num_prompts=${nprompts}"
+    echo "==================================================================="
 
-# Where to put per-run logs and JSONL results.
-RESULT_DIR="sweep_${MODEL_KEY}_${GPU}_${NODE}_$(date +%Y%m%d_%H%M%S)"
-# -----------------------------------------------------------------------------
+    python3 -m sglang.bench_serving \
+      --model "$MODEL" \
+      --dataset-name random \
+      --random-input "$ilen" \
+      --random-output "$olen" \
+      --random-range-ratio "$PERF_RANGE_RATIO" \
+      --max-concurrency "$conc" \
+      --num-prompts "$nprompts" \
+      --output-file "$jsonl" \
+      2>&1 | tee "$log"
+  }
 
-mkdir -p "$RESULT_DIR"
-echo "Writing results to: $RESULT_DIR"
-
-run_one() {
-  local ilen=$1
-  local olen=$2
-  local conc=$3
-  local nprompts=$((conc * PROMPTS_PER_CONC))
-  local tag="${ilen}_o${olen}_c${conc}"
-  local jsonl="${RESULT_DIR}/${TAG}_${tag}.jsonl"
-  local log="${RESULT_DIR}/${TAG}_${tag}.log"
+  local pair ilen olen conc
+  for pair in "${PERF_IO_PAIRS[@]}"; do
+    ilen="${pair%%:*}"
+    olen="${pair##*:}"
+    for conc in "${PERF_CONCURRENCIES[@]}"; do
+      run_one "$ilen" "$olen" "$conc" \
+        || echo "WARN: run failed for input_len=${ilen} output_len=${olen} conc=${conc}, continuing..."
+    done
+  done
 
   echo
-  echo "==================================================================="
-  echo ">>> input_len=${ilen}  output_len=${olen}  max_concurrency=${conc}  num_prompts=${nprompts}"
-  echo "==================================================================="
+  echo "Perf runs done. Summarizing -> ${result_dir}/summary.txt"
+  if ! python3 "$SUMMARIZE_PERF" "$result_dir" "$TAG" "$MODEL" "$NODE" "$GPU" "${NUM_GPUS:-}" \
+      | tee "${result_dir}/summary.txt"; then
+    echo "WARN: perf summary failed (see above); raw logs/jsonl are still in ${result_dir}" >&2
+  fi
 
-  python3 -m sglang.bench_serving \
-    --model "$MODEL" \
-    --dataset-name random \
-    --random-input "$ilen" \
-    --random-output "$olen" \
-    --random-range-ratio "$RANGE_RATIO" \
-    --max-concurrency "$conc" \
-    --num-prompts "$nprompts" \
-    --output-file "$jsonl" \
-    2>&1 | tee "$log"
+  bench_package_results "$result_dir"
 }
 
-for pair in "${IO_PAIRS[@]}"; do
-  ilen="${pair%%:*}"
-  olen="${pair##*:}"
-  for conc in "${CONCURRENCIES[@]}"; do
-    # Don't abort the whole sweep if one run fails; warn and continue.
-    run_one "$ilen" "$olen" "$conc" \
-      || echo "WARN: run failed for input_len=${ilen} output_len=${olen} conc=${conc}, continuing..."
+run_accuracy() {
+  bench_require_sglang_root
+
+  local result_dir="$ACC_RESULT_DIR"
+  mkdir -p "$result_dir"
+  result_dir="$(cd "$result_dir" && pwd)"
+  echo "SGLang root: $SGLANG_ROOT"
+  echo "Server: ${ACC_HOST}:${ACC_PORT}"
+  echo "Accuracy runs: ${ACC_RUNS}"
+  echo "Writing accuracy results to: $result_dir"
+
+  local run_idx run_tag log result_jsonl
+  for ((run_idx = 1; run_idx <= ACC_RUNS; run_idx++)); do
+    run_tag="$(printf 'run%03d' "$run_idx")"
+    log="${result_dir}/${TAG}_${run_tag}.log"
+    result_jsonl="${result_dir}/${TAG}_${run_tag}.jsonl"
+
+    echo
+    echo "==================================================================="
+    echo ">>> GSM8K ${run_tag} (${run_idx}/${ACC_RUNS})"
+    echo ">>> num_questions=${ACC_NUM_QUESTIONS}  parallel=${ACC_PARALLEL}  num_shots=${ACC_NUM_SHOTS}"
+    echo "==================================================================="
+
+    if ! (
+      cd "$SGLANG_ROOT"
+      python3 benchmark/gsm8k/bench_sglang.py \
+        --num-questions "$ACC_NUM_QUESTIONS" \
+        --parallel "$ACC_PARALLEL" \
+        --num-shots "$ACC_NUM_SHOTS" \
+        --host "$ACC_HOST" \
+        --port "$ACC_PORT" \
+        --result-file "$result_jsonl"
+    ) 2>&1 | tee "$log"; then
+      echo "WARN: GSM8K ${run_tag} (${run_idx}/${ACC_RUNS}) failed, continuing..." >&2
+    fi
   done
-done
 
-echo
-echo "All runs done. Summarizing -> ${RESULT_DIR}/summary.txt"
-python3 - "$RESULT_DIR" "$TAG" "$MODEL" "$NODE" "$GPU" "${NUM_GPUS:-}" <<'PY' | tee "${RESULT_DIR}/summary.txt"
-import glob, json, os, sys
+  echo
+  echo "Summarizing -> ${result_dir}/summary.txt"
+  if ! python3 "$SUMMARIZE_ACC" \
+      "$result_dir" "$TAG" "$MODEL" "$NODE" "$GPU" \
+      "$ACC_NUM_SHOTS" "$ACC_NUM_QUESTIONS" "$ACC_PARALLEL" "$ACC_RUNS" \
+      | tee "${result_dir}/summary.txt"; then
+    echo "WARN: accuracy summary failed (see above); raw logs/jsonl are still in ${result_dir}" >&2
+  fi
 
-result_dir = sys.argv[1]
-prefix = sys.argv[2]
-model = sys.argv[3]
-node = sys.argv[4]
-gpu = sys.argv[5]
-default_num_gpus = int(sys.argv[6]) if len(sys.argv) > 6 and sys.argv[6] else None
+  bench_package_results "$result_dir"
+}
 
-def num_gpus_for(d):
-    tp = d.get("server_info", {}).get("tp_size")
-    if tp:
-        return int(tp)
-    if default_num_gpus:
-        return default_num_gpus
-    return 1
-
-print(f"Model: {model}")
-print(f"Node:  {node}    GPU: {gpu}")
-if default_num_gpus:
-    print(f"Num GPUs (TP, default): {default_num_gpus}")
-print()
-rows = []
-for path in glob.glob(os.path.join(result_dir, f"{prefix}_*.jsonl")):
-    with open(path) as f:
-        lines = [l for l in f if l.strip()]
-    if not lines:
-        continue
-    d = json.loads(lines[-1])  # last run in the file
-    rows.append(d)
-
-# Sort by input length, then by configured concurrency.
-if not rows:
-    print("No result JSONL files found; nothing to summarize.")
-    sys.exit(0)
-
-rows.sort(key=lambda d: (d.get("random_input_len", 0), d.get("max_concurrency", 0)))
-
-# Metrics of interest:
-#   TTFT          -> median time-to-first-token (ms)
-#   TPOT          -> median time-per-output-token (ms)
-#   out_tok/s     -> output throughput (tokens/s, aggregate)
-#   tot/gpu       -> total token throughput (tok/s) / num_gpus
-#   interactivity -> 1000 / median TPOT (tokens/s per request)
-hdr = (
-    f"{'input':>8} {'conc':>4} {'act_conc':>8} "
-    f"{'TTFT_ms':>10} {'TPOT_ms':>9} {'out_tok/s':>10} {'tot/gpu':>10} {'interact':>9}"
-)
-print(hdr)
-print("-" * len(hdr))
-
-table = []
-for d in rows:
-    tpot = d.get("median_tpot_ms", 0) or 0
-    interactivity = 1000.0 / tpot if tpot else 0.0
-    num_gpus = num_gpus_for(d)
-    total_tput = d.get("total_throughput", 0) or 0
-    total_per_gpu = total_tput / num_gpus if num_gpus else 0.0
-    print(
-        f"{d.get('random_input_len',0):>8} "
-        f"{d.get('max_concurrency',0):>4} "
-        f"{d.get('concurrency',0):>8.2f} "
-        f"{d.get('median_ttft_ms',0):>10.1f} "
-        f"{tpot:>9.3f} "
-        f"{d.get('output_throughput',0):>10.2f} "
-        f"{total_per_gpu:>10.2f} "
-        f"{interactivity:>9.2f}"
-    )
-    table.append(
-        {
-            "input_len": d.get("random_input_len", 0),
-            "max_concurrency": d.get("max_concurrency", 0),
-            "actual_concurrency": round(d.get("concurrency", 0), 2),
-            "TTFT_median_ms": round(d.get("median_ttft_ms", 0), 1),
-            "TPOT_median_ms": round(tpot, 3),
-            "output_tok_per_s": round(d.get("output_throughput", 0), 2),
-            "total_tok_per_gpu": round(total_per_gpu, 2),
-            "interactivity_tok_per_s": round(interactivity, 2),
-        }
-    )
-
-# Build per-input-length summaries: rows = max_concurrency, cols = metrics.
-import pandas as pd
-
-df = pd.DataFrame(table)
-
-METRIC_COLS = [
-    "TTFT_median_ms",
-    "TPOT_median_ms",
-    "output_tok_per_s",
-    "total_tok_per_gpu",
-    "interactivity_tok_per_s",
-]
-
-
-def pivot_for(input_len):
-    sub = df[df["input_len"] == input_len].copy()
-    sub = sub.sort_values("max_concurrency").set_index("max_concurrency")
-    return sub[METRIC_COLS]
-
-
-input_lens = sorted(df["input_len"].unique())
-
-# CSV: one pivoted file per input length (CSV is single-table only).
-for il in input_lens:
-    p = os.path.join(result_dir, f"summary_{il}.csv")
-    pivot_for(il).to_csv(p, index_label="max_concurrency")
-    print(f"\nCSV written: {p}")
-
-# Excel: one workbook, one sheet per input length (rows=concurrency, cols=metrics).
-xlsx_path = os.path.join(result_dir, "summary.xlsx")
-try:
-    with pd.ExcelWriter(xlsx_path) as writer:
-        for il in input_lens:
-            sheet = f"in_{il}"
-            pivot_for(il).to_excel(writer, sheet_name=sheet, index_label="max_concurrency")
-    print(f"Excel written: {xlsx_path} (one sheet per input length)")
-except ImportError:
-    print("Excel (.xlsx) skipped: openpyxl not installed.")
-    print("  Install with: pip install openpyxl   (CSV files above already open in Excel)")
-PY
-
-# ---- Package everything (xlsx + csv + txt + logs + jsonl) into one archive ----
-# Prefer zip; fall back to tar.gz when zip is not installed.
-if command -v zip >/dev/null 2>&1; then
-  ARCHIVE="${RESULT_DIR}.zip"
-  zip -r -q "$ARCHIVE" "$RESULT_DIR"
-else
-  echo "NOTE: 'zip' not found, using tar.gz instead (install with: apt-get install -y zip)."
-  ARCHIVE="${RESULT_DIR}.tar.gz"
-  tar -czf "$ARCHIVE" "$RESULT_DIR"
-fi
-echo
-echo "Packaged results -> $(readlink -f "$ARCHIVE")"
-echo
-echo "To download to your local machine, run this FROM your local PowerShell"
-echo "(replace <YOUR_LOCAL_DEST_DIR> with your own target folder):"
-echo "  scp $(whoami)@$(hostname):$(readlink -f "$ARCHIVE") \"<YOUR_LOCAL_DEST_DIR>\""
+case "$BENCH_MODE" in
+  perf) run_perf_sweep ;;
+  acc)  run_accuracy ;;
+  *)
+    echo "ERROR: unknown --mode '$BENCH_MODE' (expected: perf | acc)" >&2
+    exit 1
+    ;;
+esac
