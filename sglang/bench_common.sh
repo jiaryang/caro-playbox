@@ -103,21 +103,46 @@ bench_detect_node_gpu() {
   GPU="${GPU:-$(normalize_gpu "$GPU_RAW")}"
 }
 
-bench_package_results() {
-  local result_dir=$1
-  local archive=""
-  if command -v zip >/dev/null 2>&1; then
-    archive="${result_dir}.zip"
-    zip -r -q "$archive" "$result_dir"
-  else
-    echo "NOTE: 'zip' not found, using tar.gz instead (install with: apt-get install -y zip)."
-    archive="${result_dir}.tar.gz"
-    tar -czf "$archive" "$result_dir"
+# Query /server_info and return "mtp" or "nomtp".
+bench_detect_mtp_from_server() {
+  local host=$1
+  local port=$2
+  python3 - "$host" "$port" <<'PY'
+import json
+import sys
+import urllib.error
+import urllib.request
+
+host, port = sys.argv[1], sys.argv[2]
+try:
+    with urllib.request.urlopen(
+        f"http://{host}:{port}/server_info", timeout=5
+    ) as resp:
+        data = json.load(resp)
+except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError):
+    print("nomtp", end="")
+    raise SystemExit(0)
+
+if isinstance(data, dict) and "decode" in data:
+    data = data["decode"][0]
+
+algo = data.get("speculative_algorithm") if isinstance(data, dict) else None
+if algo:
+    print("mtp", end="")
+else:
+    print("nomtp", end="")
+PY
+}
+
+# Sets MTP_TAG to "mtp" or "nomtp".
+# Optional MTP_OVERRIDE (from --mtp / --no-mtp) skips server auto-detect.
+bench_resolve_mtp_tag() {
+  if [[ -n "${MTP_OVERRIDE:-}" ]]; then
+    MTP_TAG="$MTP_OVERRIDE"
+    return
   fi
-  echo
-  echo "Packaged results -> $(readlink -f "$archive")"
-  echo
-  echo "To download to your local machine, run this FROM your local PowerShell"
-  echo "(replace <YOUR_LOCAL_DEST_DIR> with your own target folder):"
-  echo "  scp $(whoami)@$(hostname):$(readlink -f "$archive") \"<YOUR_LOCAL_DEST_DIR>\""
+
+  local host="${BENCH_SERVER_HOST:-127.0.0.1}"
+  local port="${BENCH_SERVER_PORT:-30000}"
+  MTP_TAG="$(bench_detect_mtp_from_server "$host" "$port")"
 }
