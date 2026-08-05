@@ -3,6 +3,7 @@ import csv
 import glob
 import json
 import os
+import re
 import sys
 
 
@@ -13,6 +14,18 @@ def num_gpus_for(d, default_num_gpus):
     if default_num_gpus:
         return default_num_gpus
     return 1
+
+
+def accept_length_for(d, jsonl_path):
+    val = d.get("accept_length")
+    if val is not None:
+        return float(val)
+    log_path = jsonl_path[:-6] + ".log" if jsonl_path.endswith(".jsonl") else jsonl_path + ".log"
+    if os.path.isfile(log_path):
+        m = re.search(r"Accept length:\s+([\d.]+)", open(log_path).read())
+        if m:
+            return float(m.group(1))
+    return None
 
 
 def main():
@@ -29,34 +42,39 @@ def main():
         print(f"Num GPUs (TP, default): {default_num_gpus}")
     print()
 
-    rows = []
+    entries = []
     for path in glob.glob(os.path.join(result_dir, f"{prefix}_*.jsonl")):
         with open(path) as f:
             lines = [l for l in f if l.strip()]
         if lines:
-            rows.append(json.loads(lines[-1]))
+            entries.append((json.loads(lines[-1]), path))
 
-    if not rows:
+    if not entries:
         print("No result JSONL files found; nothing to summarize.")
         return 0
 
-    rows.sort(key=lambda d: (d.get("random_input_len", 0), d.get("max_concurrency", 0)))
+    entries.sort(key=lambda e: (e[0].get("random_input_len", 0), e[0].get("max_concurrency", 0)))
+
+    show_accept = any(accept_length_for(d, p) is not None for d, p in entries)
 
     hdr = (
         f"{'input':>8} {'conc':>4} {'act_conc':>8} "
         f"{'TTFT_ms':>10} {'TPOT_ms':>9} {'out_tok/s':>10} {'tot/gpu':>10} {'interact':>9}"
     )
+    if show_accept:
+        hdr += f" {'accept':>7}"
     print(hdr)
     print("-" * len(hdr))
 
     table = []
-    for d in rows:
+    for d, path in entries:
         tpot = d.get("median_tpot_ms", 0) or 0
         interactivity = 1000.0 / tpot if tpot else 0.0
         ng = num_gpus_for(d, default_num_gpus)
         total_tput = d.get("total_throughput", 0) or 0
         total_per_gpu = total_tput / ng if ng else 0.0
-        print(
+        accept_len = accept_length_for(d, path)
+        line = (
             f"{d.get('random_input_len', 0):>8} "
             f"{d.get('max_concurrency', 0):>4} "
             f"{d.get('concurrency', 0):>8.2f} "
@@ -66,18 +84,22 @@ def main():
             f"{total_per_gpu:>10.2f} "
             f"{interactivity:>9.2f}"
         )
-        table.append(
-            {
-                "input_len": d.get("random_input_len", 0),
-                "max_concurrency": d.get("max_concurrency", 0),
-                "actual_concurrency": round(d.get("concurrency", 0), 2),
-                "TTFT_median_ms": round(d.get("median_ttft_ms", 0), 1),
-                "TPOT_median_ms": round(tpot, 3),
-                "output_tok_per_s": round(d.get("output_throughput", 0), 2),
-                "total_tok_per_gpu": round(total_per_gpu, 2),
-                "interactivity_tok_per_s": round(interactivity, 2),
-            }
-        )
+        if show_accept:
+            line += f" {accept_len:>7.2f}" if accept_len is not None else f" {'-':>7}"
+        print(line)
+        row = {
+            "input_len": d.get("random_input_len", 0),
+            "max_concurrency": d.get("max_concurrency", 0),
+            "actual_concurrency": round(d.get("concurrency", 0), 2),
+            "TTFT_median_ms": round(d.get("median_ttft_ms", 0), 1),
+            "TPOT_median_ms": round(tpot, 3),
+            "output_tok_per_s": round(d.get("output_throughput", 0), 2),
+            "total_tok_per_gpu": round(total_per_gpu, 2),
+            "interactivity_tok_per_s": round(interactivity, 2),
+        }
+        if show_accept:
+            row["accept_length"] = round(accept_len, 2) if accept_len is not None else None
+        table.append(row)
 
     metric_cols = [
         "TTFT_median_ms",
@@ -86,6 +108,8 @@ def main():
         "total_tok_per_gpu",
         "interactivity_tok_per_s",
     ]
+    if show_accept:
+        metric_cols.append("accept_length")
     input_lens = sorted({r["input_len"] for r in table})
 
     for il in input_lens:
