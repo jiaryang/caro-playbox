@@ -47,9 +47,9 @@ Perf (--mode perf):
   --perf-range-ratio F     random length range ratio  (default: 0.8)
   --perf-prompts-per-conc N  num-prompts = concurrency * N  (default: 5)
   --perf-result-dir PATH   output directory  (default: perf_<model>_<mtp|nomtp>_<gpu>_<node>_<ts>)
-  --profile                enable torch profiling (output=16, prompts=conc*2)
-  --profile-output-dir DIR profile trace directory  (default: /sgl-workspace/profiles)
-  --profile-num-steps N    profile decode steps  (default: 10)
+  --profile                enable torch profiling (output=64 nomtp / 128 mtp, prompts=conc*2)
+  --profile-output-dir DIR profile trace directory  (default: profiles)
+  --profile-num-steps N    profile decode steps  (default: 20)
   --profile-prefix PREFIX  trace filename prefix  (default: auto per run)
 
 Accuracy (--mode acc):
@@ -77,17 +77,17 @@ BENCH_SERVER_HOST="127.0.0.1"
 BENCH_SERVER_PORT="30000"
 MTP_OVERRIDE=""
 
-#PERF_IO_PAIRS_STR="70000:300"
-PERF_IO_PAIRS_STR="8192:1024"
+PERF_IO_PAIRS_STR="70000:300"
+#PERF_IO_PAIRS_STR="8192:1024"
 PERF_CONCURRENCIES_STR="4,8,16,32,64"
 PERF_RANGE_RATIO="0.8"
 PERF_PROMPTS_PER_CONC="5"
 PERF_RESULT_DIR=""
 PERF_PROFILE=false
-PERF_PROFILE_OUTPUT_DIR="/sgl-workspace/profiles"
-PERF_PROFILE_NUM_STEPS="10"
+PERF_PROFILE_OUTPUT_DIR="profiles"
+PERF_PROFILE_NUM_STEPS="20"
 PERF_PROFILE_PREFIX=""
-PERF_PROFILE_OUTPUT_LEN="16"
+PERF_PROFILE_OUTPUT_LEN=""
 PERF_PROFILE_PROMPT_MULTIPLIER="2"
 
 ACC_NUM_QUESTIONS="2000"
@@ -164,6 +164,14 @@ fi
 bench_resolve_mtp_tag
 TAG="${TAG}_${MTP_TAG}"
 
+if [[ "$PERF_PROFILE" == true ]]; then
+  if [[ "$MTP_TAG" == "mtp" ]]; then
+    PERF_PROFILE_OUTPUT_LEN="${PERF_PROFILE_OUTPUT_LEN:-128}"
+  else
+    PERF_PROFILE_OUTPUT_LEN="${PERF_PROFILE_OUTPUT_LEN:-64}"
+  fi
+fi
+
 IFS=',' read -ra _perf_io_raw <<< "$PERF_IO_PAIRS_STR"
 PERF_IO_PAIRS=("${_perf_io_raw[@]}")
 
@@ -206,7 +214,7 @@ echo "MTP tag: $MTP_TAG  (server=${BENCH_SERVER_HOST}:${BENCH_SERVER_PORT}$([ -n
 echo "File tag prefix: $TAG"
 echo "Mode: $BENCH_MODE"
 if [[ "$PERF_PROFILE" == true ]]; then
-  echo "Profile: enabled  output_len=${PERF_PROFILE_OUTPUT_LEN}  prompts=conc*${PERF_PROFILE_PROMPT_MULTIPLIER}"
+  echo "Profile: enabled  mtp=${MTP_TAG}  output_len=${PERF_PROFILE_OUTPUT_LEN}  prompts=conc*${PERF_PROFILE_PROMPT_MULTIPLIER}"
   echo "Profile dir: $PERF_PROFILE_OUTPUT_DIR  num_steps=${PERF_PROFILE_NUM_STEPS}"
 fi
 

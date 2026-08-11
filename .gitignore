@@ -3,3 +3,9 @@ sglang/perf_*/
 sglang/acc_*/
 sglang/sweep_*/
 sglang/*.zip
+sglang/*.log
+sglang/*.jsonl
+sglang/*.txt
+sglang/profiles/
+sglang/profiles-*/
+sglang/profiles*.tar.gz
