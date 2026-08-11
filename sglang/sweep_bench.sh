@@ -17,6 +17,7 @@ if [[ -z "${BASH_VERSION:-}" ]]; then
 fi
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/bench_common.sh"
+BENCH_SCRIPT_NAME="$0"
 bench_common_init
 
 SUMMARIZE_PERF="${BENCH_SCRIPT_DIR}/summarize_perf.py"
@@ -34,7 +35,7 @@ Shared:
   --gpu TAG                short GPU tag, e.g. mi355  (default: auto-detect)
   --node NAME              node name tag  (default: hostname)
   --num-gpus N             TP size for per-GPU throughput in summary
-  --sglang-root PATH       sglang checkout  (default: ../../sglang)
+  --sglang-root PATH       sglang checkout  (default: /sgl-workspace/sglang)
   --server-host HOST       server host for MTP auto-detect  (default: 127.0.0.1)
   --server-port PORT       server port for MTP auto-detect  (default: 30000)
   --mtp                    tag/folder suffix: force mtp (skip auto-detect)
@@ -72,7 +73,6 @@ GPU_VENDOR=""
 GPU=""
 NODE=""
 NUM_GPUS=""
-SGLANG_ROOT="${SGLANG_ROOT:-$(cd "$BENCH_SCRIPT_DIR/../../sglang" 2>/dev/null && pwd)}"
 BENCH_SERVER_HOST="127.0.0.1"
 BENCH_SERVER_PORT="30000"
 MTP_OVERRIDE=""
@@ -130,30 +130,24 @@ while [[ $# -gt 0 ]]; do
     --acc-result-dir)    ACC_RESULT_DIR="$2"; shift 2 ;;
     -h|--help)           usage; exit 0 ;;
     *)
-      echo "ERROR: unknown argument: $1" >&2
-      usage >&2
-      exit 1
+      bench_die "unknown argument: $1"
       ;;
   esac
 done
 
 if [[ -z "$MODEL_KEY" ]]; then
-  echo "ERROR: --model-key is required (qwen | dsv4 | glm)" >&2
-  usage >&2
-  exit 1
+  bench_die "--model-key is required (qwen | dsv4 | glm)"
 fi
 
 if ! [[ "$ACC_RUNS" =~ ^[1-9][0-9]*$ ]]; then
-  echo "ERROR: --acc-runs must be a positive integer (got: '$ACC_RUNS')" >&2
-  exit 1
+  bench_die "--acc-runs must be a positive integer (got: '${ACC_RUNS}')"
 fi
 
 if [[ "$PERF_PROFILE" == true ]]; then
   if ! [[ "$PERF_PROFILE_NUM_STEPS" =~ ^[1-9][0-9]*$ ]]; then
-    echo "ERROR: --profile-num-steps must be a positive integer (got: '$PERF_PROFILE_NUM_STEPS')" >&2
-    exit 1
+    bench_die "--profile-num-steps must be a positive integer (got: '${PERF_PROFILE_NUM_STEPS}')"
   fi
-  mkdir -p "$PERF_PROFILE_OUTPUT_DIR"
+  mkdir -p "$PERF_PROFILE_OUTPUT_DIR" || bench_die "cannot create profile output directory: ${PERF_PROFILE_OUTPUT_DIR}"
 fi
 
 if [[ -z "$GPU_VENDOR" ]]; then
@@ -179,6 +173,32 @@ _ts="$(date +%Y%m%d_%H%M%S)"
 PERF_RESULT_DIR="${PERF_RESULT_DIR:-perf_${MODEL_KEY}_${MTP_TAG}_${GPU}_${NODE}_${_ts}}"
 ACC_RESULT_DIR="${ACC_RESULT_DIR:-acc_${MODEL_KEY}_${MTP_TAG}_${GPU}_${NODE}_${_ts}}"
 
+if [[ "$BENCH_MODE" == "acc" ]]; then
+  BENCH_RESULT_DIR="$ACC_RESULT_DIR"
+else
+  BENCH_RESULT_DIR="$PERF_RESULT_DIR"
+fi
+
+bench_setup_logging "$BENCH_RESULT_DIR"
+
+if ! bench_resolve_sglang_root; then
+  if [[ "$BENCH_MODE" == "acc" ]]; then
+    bench_die "could not resolve SGLANG_ROOT (tried: /sgl-workspace/sglang, ${BENCH_SCRIPT_DIR}/../../sglang); use --sglang-root or SGLANG_ROOT=/path/to/sglang"
+  fi
+  echo "NOTE: SGLANG_ROOT not set (optional for --mode perf)"
+fi
+
+if [[ "$BENCH_MODE" == "acc" ]]; then
+  bench_require_sglang_root
+fi
+
+if [[ ! -f "$SUMMARIZE_PERF" ]]; then
+  bench_die "missing summarize script: ${SUMMARIZE_PERF}"
+fi
+if [[ ! -f "$SUMMARIZE_ACC" ]]; then
+  bench_die "missing summarize script: ${SUMMARIZE_ACC}"
+fi
+
 echo "Model: $MODEL  (MODEL_KEY=$MODEL_KEY, GPU_VENDOR=$GPU_VENDOR)"
 [[ -n "${NUM_GPUS:-}" ]] && echo "Num GPUs (TP): $NUM_GPUS"
 echo "Node: $NODE  GPU: $GPU  (detected: ${GPU_RAW:-none})"
@@ -192,7 +212,6 @@ fi
 
 run_perf_sweep() {
   local result_dir="$PERF_RESULT_DIR"
-  mkdir -p "$result_dir"
   result_dir="$(cd "$result_dir" && pwd)"
   echo "Writing perf results to: $result_dir"
 
@@ -233,7 +252,7 @@ run_perf_sweep() {
       )
     fi
 
-    python3 -m sglang.bench_serving \
+    if ! python3 -m sglang.bench_serving \
       --model "$MODEL" \
       --dataset-name random \
       --random-input "$ilen" \
@@ -243,16 +262,23 @@ run_perf_sweep() {
       --num-prompts "$nprompts" \
       --output-file "$jsonl" \
       "${profile_args[@]}" \
-      2>&1 | tee "$log"
+      2>&1 | tee "$log"; then
+      bench_die "bench_serving failed for input_len=${ilen} output_len=${run_olen} conc=${conc} (see ${log})"
+    fi
   }
 
   local pair ilen olen conc
   for pair in "${PERF_IO_PAIRS[@]}"; do
     ilen="${pair%%:*}"
     olen="${pair##*:}"
+    if [[ -z "$ilen" || -z "$olen" || "$ilen" == "$pair" ]]; then
+      bench_die "invalid --perf-io-pairs entry '${pair}' (expected input:output, e.g. 8192:1024)"
+    fi
     for conc in "${PERF_CONCURRENCIES[@]}"; do
-      run_one "$ilen" "$olen" "$conc" \
-        || echo "WARN: run failed for input_len=${ilen} output_len=${olen} conc=${conc}, continuing..."
+      if ! [[ "$conc" =~ ^[1-9][0-9]*$ ]]; then
+        bench_die "invalid concurrency value '${conc}' in --perf-concurrencies"
+      fi
+      run_one "$ilen" "$olen" "$conc"
     done
   done
 
@@ -260,15 +286,12 @@ run_perf_sweep() {
   echo "Perf runs done. Summarizing -> ${result_dir}/summary.txt"
   if ! python3 "$SUMMARIZE_PERF" "$result_dir" "$TAG" "$MODEL" "$NODE" "$GPU" "${NUM_GPUS:-}" \
       | tee "${result_dir}/summary.txt"; then
-    echo "WARN: perf summary failed (see above); raw logs/jsonl are still in ${result_dir}" >&2
+    bench_die "perf summary failed (see ${result_dir}/summary.txt)"
   fi
 }
 
 run_accuracy() {
-  bench_require_sglang_root
-
   local result_dir="$ACC_RESULT_DIR"
-  mkdir -p "$result_dir"
   result_dir="$(cd "$result_dir" && pwd)"
   echo "SGLang root: $SGLANG_ROOT"
   echo "Server: ${ACC_HOST}:${ACC_PORT}"
@@ -297,7 +320,7 @@ run_accuracy() {
         --port "$ACC_PORT" \
         --result-file "$result_jsonl"
     ) 2>&1 | tee "$log"; then
-      echo "WARN: GSM8K ${run_tag} (${run_idx}/${ACC_RUNS}) failed, continuing..." >&2
+      bench_die "GSM8K ${run_tag} (${run_idx}/${ACC_RUNS}) failed (see ${log})"
     fi
   done
 
@@ -307,7 +330,7 @@ run_accuracy() {
       "$result_dir" "$TAG" "$MODEL" "$NODE" "$GPU" \
       "$ACC_NUM_SHOTS" "$ACC_NUM_QUESTIONS" "$ACC_PARALLEL" "$ACC_RUNS" \
       | tee "${result_dir}/summary.txt"; then
-    echo "WARN: accuracy summary failed (see above); raw logs/jsonl are still in ${result_dir}" >&2
+    bench_die "accuracy summary failed (see ${result_dir}/summary.txt)"
   fi
 }
 
@@ -315,7 +338,6 @@ case "$BENCH_MODE" in
   perf) run_perf_sweep ;;
   acc)  run_accuracy ;;
   *)
-    echo "ERROR: unknown --mode '$BENCH_MODE' (expected: perf | acc)" >&2
-    exit 1
+    bench_die "unknown --mode '${BENCH_MODE}' (expected: perf | acc)"
     ;;
 esac

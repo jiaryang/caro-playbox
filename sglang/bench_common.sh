@@ -1,15 +1,80 @@
 # Shared helpers for sweep_bench.sh — do not run directly.
 
+BENCH_SCRIPT_NAME="${BENCH_SCRIPT_NAME:-sweep_bench.sh}"
+BENCH_MASTER_LOG=""
+
+bench_die() {
+  local msg="$*"
+  echo "ERROR: ${msg}" >&2
+  if [[ -z "${BENCH_MASTER_LOG:-}" && -n "${BENCH_SCRIPT_DIR:-}" ]]; then
+    printf '%s\n' "ERROR: ${msg}" >> "${BENCH_SCRIPT_DIR}/sweep_latest_error.log"
+  fi
+  trap - ERR
+  exit 1
+}
+
+bench_on_err() {
+  local exit_code=$?
+  local line=${BASH_LINENO[0]:-?}
+  local cmd=${BASH_COMMAND:-?}
+  bench_die "unexpected failure (exit ${exit_code}) at line ${line}: ${cmd}"
+}
+
+bench_setup_logging() {
+  local result_dir="$1"
+  mkdir -p "$result_dir" || bench_die "cannot create result directory: ${result_dir}"
+  result_dir="$(cd "$result_dir" && pwd)" || bench_die "cannot access result directory: ${result_dir}"
+
+  BENCH_MASTER_LOG="${result_dir}/sweep.log"
+  : > "$BENCH_MASTER_LOG"
+
+  exec > >(tee -a "$BENCH_MASTER_LOG") 2>&1
+  set -E
+  trap 'bench_on_err' ERR
+
+  echo "Master log: ${BENCH_MASTER_LOG}"
+}
+
+bench_default_sglang_root() {
+  local d candidate
+  local defaults=(
+    "${BENCH_DEFAULT_SGLANG_ROOT:-/sgl-workspace/sglang}"
+    "${BENCH_SCRIPT_DIR}/../../sglang"
+  )
+  for d in "${defaults[@]}"; do
+    candidate="$(cd "$d" 2>/dev/null && pwd || true)"
+    if [[ -n "$candidate" && -d "$candidate" ]]; then
+      echo "$candidate"
+      return 0
+    fi
+  done
+}
+
+bench_resolve_sglang_root() {
+  if [[ -n "${SGLANG_ROOT:-}" ]]; then
+    return 0
+  fi
+
+  local candidate
+  candidate="$(bench_default_sglang_root)"
+  if [[ -n "$candidate" ]]; then
+    SGLANG_ROOT="$candidate"
+    return 0
+  fi
+
+  return 1
+}
+
 bench_common_init() {
   BENCH_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[1]}")" && pwd)"
-  SGLANG_ROOT="${SGLANG_ROOT:-$(cd "$BENCH_SCRIPT_DIR/../../sglang" 2>/dev/null && pwd)}"
 }
 
 bench_require_sglang_root() {
+  if [[ -z "${SGLANG_ROOT:-}" ]]; then
+    bench_die "SGLANG_ROOT is not set; use --sglang-root or SGLANG_ROOT=/path/to/sglang"
+  fi
   if [[ ! -f "${SGLANG_ROOT}/benchmark/gsm8k/bench_sglang.py" ]]; then
-    echo "ERROR: cannot find benchmark/gsm8k/bench_sglang.py under SGLANG_ROOT=${SGLANG_ROOT}" >&2
-    echo "       Set SGLANG_ROOT to your sglang checkout, e.g. SGLANG_ROOT=/path/to/sglang bash $0" >&2
-    exit 1
+    bench_die "cannot find benchmark/gsm8k/bench_sglang.py under SGLANG_ROOT=${SGLANG_ROOT}"
   fi
 }
 
@@ -66,9 +131,7 @@ bench_resolve_model() {
         cuda) MODEL="$QWEN_MODEL_CUDA" ;;
         amd)  MODEL="$QWEN_MODEL_AMD" ;;
         *)
-          echo "ERROR: MODEL_KEY=qwen needs a known GPU vendor, but detection failed." >&2
-          echo "       Set it explicitly, e.g. GPU_VENDOR=cuda bash $0" >&2
-          exit 1
+          bench_die "MODEL_KEY=qwen needs a known GPU vendor; set GPU_VENDOR=cuda or GPU_VENDOR=amd"
           ;;
       esac
       TAG="qwen" ;;
@@ -78,15 +141,12 @@ bench_resolve_model() {
         cuda) MODEL="$GLM_MODEL_CUDA" ;;
         amd)  MODEL="$GLM_MODEL_AMD" ;;
         *)
-          echo "ERROR: MODEL_KEY=glm needs a known GPU vendor, but detection failed." >&2
-          echo "       Set it explicitly, e.g. GPU_VENDOR=amd bash $0" >&2
-          exit 1
+          bench_die "MODEL_KEY=glm needs a known GPU vendor; set GPU_VENDOR=cuda or GPU_VENDOR=amd"
           ;;
       esac
       TAG="glm" ;;
     *)
-      echo "Unknown MODEL_KEY: '$MODEL_KEY' (expected: qwen | dsv4 | glm)" >&2
-      exit 1
+      bench_die "unknown MODEL_KEY '${MODEL_KEY}' (expected: qwen | dsv4 | glm)"
       ;;
   esac
 
