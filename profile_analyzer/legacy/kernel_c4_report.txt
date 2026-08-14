@@ -1,0 +1,216 @@
+﻿Loaded ('8k', 'b200'): glm_mtp_glm_b200_i8192_c4-1785920750.2769158-TP-0-DECODE.trace.json.gz  [glm_mtp_glm_b200_i8192_c4-*-TP-0-DECODE.trace.json.gz]
+Loaded ('8k', 'mi355'): glm_mtp_glm_mi355_i8192_c4-1785988031.394309-TP-0-EXTEND.trace.json.gz  [glm_mtp_glm_mi355_i8192_c4-*-TP-0-EXTEND.trace.json.gz]
+Loaded ('70k', 'b200'): glm_mtp_glm_b200_i70000_c4-1785916708.130808-TP-0-EXTEND.trace.json.gz  [glm_mtp_glm_b200_i70000_c4-*-TP-0-EXTEND.trace.json.gz]
+Loaded ('70k', 'mi355'): glm_mtp_glm_mi355_i70000_c4-1785918338.6063445-TP-0-EXTEND.trace.json.gz  [glm_mtp_glm_mi355_i70000_c4-*-TP-0-EXTEND.trace.json.gz]
+
+==========================================================================================
+Trace file notes
+==========================================================================================
+  8k b200: glm_mtp_glm_b200_i8192_c4-*-TP-0-DECODE.trace.json.gz
+  8k mi355: glm_mtp_glm_mi355_i8192_c4-*-TP-0-EXTEND.trace.json.gz  WARNING: decode trace unavailable, only partial phases
+  70k b200: glm_mtp_glm_b200_i70000_c4-*-TP-0-EXTEND.trace.json.gz
+  70k mi355: glm_mtp_glm_mi355_i70000_c4-*-TP-0-EXTEND.trace.json.gz
+
+==========================================================================================
+8K conc=4 ù Phase kernel totals (ms, outliers>100ms excluded)
+==========================================================================================
+GPU    phase           kernel_ms #phase_steps
+--------------------------------------------------
+b200   draft               31.39           30
+b200   target_verify      381.92           30
+b200   draft_extend       150.50           36
+mi355  draft                0.00            0
+mi355  target_verify        0.00            0
+mi355  draft_extend        45.71            5
+
+==========================================================================================
+70K conc=4 ù Phase kernel totals (ms, outliers>100ms excluded)
+==========================================================================================
+GPU    phase           kernel_ms #phase_steps
+--------------------------------------------------
+b200   draft               14.28           18
+b200   target_verify      191.79           18
+b200   draft_extend        41.97           19
+mi355  draft               11.33           14
+mi355  target_verify      154.94           14
+mi355  draft_extend       162.95           14
+
+==========================================================================================
+8K conc=4 ù Kernel category breakdown by phase (ms)
+==========================================================================================
+GPU/phase              attention      gemm      comm norm_rope  moe_topk  kv_cache     quant  misc_gpu     other     TOTAL
+--------------------------------------------------------------------------------------------------------------------------
+b200/draft                5.3      15.6       4.7       2.0       0.7       0.2       0.1       0.8       2.0      31.4
+b200/target_verify       37.5     220.4      44.2      32.6      12.7       3.8       4.3       4.8      21.6     381.9
+b200/draft_extend        36.4      57.6      35.1       8.5       5.8       0.3       0.6       2.5       3.7     150.5
+mi355/draft                0.0       0.0       0.0       0.0       0.0       0.0       0.0       0.0       0.0       0.0
+mi355/target_verify        0.0       0.0       0.0       0.0       0.0       0.0       0.0       0.0       0.0       0.0
+mi355/draft_extend        11.2      21.3       6.1       2.1       2.1       0.1       0.5       1.7       0.5      45.7
+
+==========================================================================================
+70K conc=4 ù Kernel category breakdown by phase (ms)
+==========================================================================================
+GPU/phase              attention      gemm      comm norm_rope  moe_topk  kv_cache     quant  misc_gpu     other     TOTAL
+--------------------------------------------------------------------------------------------------------------------------
+b200/draft                0.8       8.2       1.9       1.0       0.5       0.1       0.1       0.5       1.1      14.3
+b200/target_verify       17.2     113.8      17.5      16.8       8.5       2.1       2.3       2.3      11.3     191.8
+b200/draft_extend         8.9      19.7       5.0       2.6       3.2       0.1       0.1       0.8       1.5      42.0
+mi355/draft                0.2       4.4       0.1       0.4       0.2       0.0       0.0       2.1       3.9      11.3
+mi355/target_verify       46.3      61.9       8.4      10.3      16.4       2.1       5.4       1.5       2.7     154.9
+mi355/draft_extend        46.2      64.9       9.9      10.1      16.3       2.0       5.4       2.2       6.0     163.0
+
+==========================================================================================
+8K conc=4 ù Top kernels in `draft` (ms)
+==========================================================================================
+rank    B200 ms   MI355 ms  MI/B200  kernel
+------------------------------------------------------------------------------------------
+1          3.94       0.00     0.0x  fmhaSm100fKernel_QkvE4m3OBfloat16HQk576HV512PagedKvDenseStaticTokenSp...
+2          3.41       0.00     0.0x  void (anonymous namespace)::all_reduce_kernel<(anonymous namespace)::...
+3          2.39       0.00     0.0x  nvjet_sm100_tst_192x8_64x8_2x1_v_bz_splitK_TNT
+4          2.37       0.00     0.0x  bmm_Bfloat16_Bfloat16Bfloat16_Fp32_t128x8x128u2_s6_et128x8_m128x8x16_...
+5          1.54       0.00     0.0x  bmm_E2m1_E2m1E2m1_Fp32_Ab16_Bb16_Cb16_t128x8x512u2_s5_et128x8_m128x8x...
+6          1.16       0.00     0.0x  nvjet_sm100_tst_64x8_64x16_4x1_v_bz_TNT
+7          1.14       0.00     0.0x  void flashinfer::trtllm_mnnvl_allreduce::oneshotAllreduceFusionKernel...
+8          1.06       0.00     0.0x  nvjet_sm100_tst_128x256_64x6_2x1_2cta_v_bz_TNT
+9          0.97       0.00     0.0x  bmm_Bfloat16_Bfloat16Bfloat16_Fp32_t128x8x128u2_s6_et128x8_m128x8x16_...
+10         0.97       0.00     0.0x  nvjet_sm100_tst_64x8_64x16_2x1_v_bz_splitK_TNT
+11         0.86       0.00     0.0x  bmm_Bfloat16_E2m1E2m1_Fp32_Ab16_Bb16_t128x8x512_s5_et128x8_m128x8x64_...
+12         0.76       0.00     0.0x  fmhaSm100fKernel_QkvE4m3OBfloat16HQk576HV512PagedKvDenseStaticTokenSp...
+13         0.74       0.00     0.0x  void cublasLt::splitKreduce_kernel<32, 16, int, float, __nv_bfloat16,...
+14         0.72       0.00     0.0x  nvjet_sm100_tst_64x16_64x16_4x1_v_bz_TNT
+15         0.64       0.00     0.0x  nvjet_sm100_tst_32x64_64x16_4x1_v_bz_splitK_TNN
+
+==========================================================================================
+8K conc=4 ù Top kernels in `draft_extend` (ms)
+==========================================================================================
+rank    B200 ms   MI355 ms  MI/B200  kernel
+------------------------------------------------------------------------------------------
+1         33.08       0.00     0.0x  fmhaSm100fKernel_QkvE4m3OBfloat16HQk576HV512PagedKvDenseStaticTokenSp...
+2         31.13       0.00     0.0x  ncclDevKernel_AllReduce_Sum_bf16_RING_LL(ncclDevKernelArgsStorage<409...
+3         10.71       0.00     0.0x  nvjet_sm100_tst_128x256_64x6_2x1_2cta_v_bz_TNT
+4          0.00       9.60      n/a  _sparse_mla_fwd_split_dim_kernel
+5          0.00       6.14      n/a  void quickreduce::allreduce_prototype_twoshot<quickreduce::AllReduceT...
+6          0.00       5.23      n/a  _ZN2ck20kernel_moe_gemm_2ldsINS_15GridwiseMoeGemmINS_13tensor_layout4...
+7          0.00       4.93      n/a  Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x256x64_MI16x16x1_C...
+8          0.00       4.55      n/a  _ZN2ck20kernel_moe_gemm_2ldsINS_15GridwiseMoeGemmINS_13tensor_layout4...
+9          4.51       0.00     0.0x  bmm_E2m1_E2m1E2m1_Fp32_Ab16_Bb16_Cb16_t128x8x512u2_s5_et128x8_m128x8x...
+10         4.48       0.00     0.0x  bmm_Bfloat16_Bfloat16Bfloat16_Fp32_t128x64x128u2_s5_et128x64_m256x64x...
+11         4.36       0.00     0.0x  bmm_E2m1_E2m1E2m1_Fp32_Ab16_Bb16_Cb16_t128x128x512u2_s3x3x3x3x1x3_et1...
+12         4.10       0.00     0.0x  nvjet_sm100_tst_128x256_64x6_2x2_2cta_h_bz_TNT
+13         3.33       0.00     0.0x  bmm_Bfloat16_E2m1E2m1_Fp32_Ab16_Bb16_t128x128x256u2_s6_et128x128_m256...
+14         1.85       1.38     0.7x  (anonymous namespace)::topk_transform_prefill_kernel((anonymous names...
+15         3.18       0.00     0.0x  bmm_Bfloat16_Bfloat16Bfloat16_Fp32_t128x8x128u2_s5_et128x8_m128x8x16_...
+
+==========================================================================================
+8K conc=4 ù Top kernels in `target_verify` (ms)
+==========================================================================================
+rank    B200 ms   MI355 ms  MI/B200  kernel
+------------------------------------------------------------------------------------------
+1         72.17       0.00     0.0x  bmm_E2m1_E2m1E2m1_Fp32_Ab16_Bb16_Cb16_t128x8x512u2_s5_et128x8_m128x8x...
+2         39.58       0.00     0.0x  bmm_Bfloat16_E2m1E2m1_Fp32_Ab16_Bb16_t128x8x512_s5_et128x8_m128x8x64_...
+3         27.75       0.00     0.0x  void flashinfer::trtllm_mnnvl_allreduce::oneshotAllreduceFusionKernel...
+4         26.51       0.00     0.0x  fmhaSm100fKernel_QkvE4m3OBfloat16HQk576HV512PagedKvDenseStaticTokenSp...
+5         22.03       0.00     0.0x  nvjet_sm100_tst_64x16_64x16_4x1_v_bz_TNT
+6         15.18       0.00     0.0x  void (anonymous namespace)::fused_a_gemm_kernel<1, 2624, 6144, 32, 16...
+7         14.15       0.00     0.0x  void moe::dev::routing::routingCustom::routingIndicesDynBlockKernel<m...
+8         13.59       0.00     0.0x  nvjet_sm100_tst_32x64_64x16_4x1_v_bz_splitK_TNN
+9         12.78       0.00     0.0x  void (anonymous namespace)::all_reduce_kernel<(anonymous namespace)::...
+10        11.35       0.00     0.0x  nvjet_sm100_tss_32x64_64x16_4x1_v_bz_splitK_TNN
+11        10.66       0.00     0.0x  nvjet_sm100_tst_64x8_64x16_2x2_h_bz_TNT
+12         9.96       0.00     0.0x  void (anonymous namespace)::fused_a_gemm_kernel<1, 4096, 2048, 32, 16...
+13         7.89       0.00     0.0x  nvjet_sm100_tst_128x8_64x12_4x2_h_bz_TNT
+14         7.88       0.00     0.0x  fmhaSm100fKernel_QkvE4m3OBfloat16HQk576HV512PagedKvDenseStaticTokenSp...
+15         7.68       0.00     0.0x  void cublasLt::splitKreduce_kernel<32, 16, int, float, __nv_bfloat16,...
+
+==========================================================================================
+70K conc=4 ù Top kernels in `draft` (ms)
+==========================================================================================
+rank    B200 ms   MI355 ms  MI/B200  kernel
+------------------------------------------------------------------------------------------
+1          0.00       1.82      n/a  _ZN5aiter26cross_device_reduce_1stageIDF16bLi4ELb0EEEvPNS_8RankDataES...
+2          0.00       1.51      n/a  Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x16x128_MI16x16x1_S...
+3          1.40       0.00     0.0x  nvjet_sm100_tst_192x8_64x8_2x1_v_bz_splitK_TNT
+4          1.26       0.00     0.0x  void (anonymous namespace)::all_reduce_kernel<(anonymous namespace)::...
+5          1.11       0.00     0.0x  bmm_Bfloat16_Bfloat16Bfloat16_Fp32_t128x8x128u2_s6_et128x8_m128x8x16_...
+6          0.00       1.02      n/a  _ZN2ck15kernel_moe_gemmINS_15GridwiseMoeGemmINS_13tensor_layout4gemm8...
+7          1.00       0.00     0.0x  bmm_E2m1_E2m1E2m1_Fp32_Ab16_Bb16_Cb16_t128x8x512u2_s5_et128x8_m128x8x...
+8          0.00       0.72      n/a  void at::native::(anonymous namespace)::cunn_SoftMaxForwardGmem<4, fl...
+9          0.66       0.00     0.0x  nvjet_sm100_tst_64x8_64x16_4x1_v_bz_TNT
+10         0.63       0.00     0.0x  void flashinfer::trtllm_mnnvl_allreduce::oneshotAllreduceFusionKernel...
+11         0.57       0.00     0.0x  nvjet_sm100_tst_64x8_64x16_2x1_v_bz_splitK_TNT
+12         0.55       0.00     0.0x  bmm_Bfloat16_E2m1E2m1_Fp32_Ab16_Bb16_t128x8x512_s5_et128x8_m128x8x64_...
+13         0.00       0.52      n/a  hgemm_bf16_16x128x128x3_SPK4_W1x4x1_BLDS1_TN_AS1_0
+14         0.00       0.52      n/a  void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, at...
+15         0.45       0.00     0.0x  fmhaSm100fKernel_QkvE4m3OBfloat16HQk576HV512PagedKvDenseStaticTokenSp...
+
+==========================================================================================
+70K conc=4 ù Top kernels in `draft_extend` (ms)
+==========================================================================================
+rank    B200 ms   MI355 ms  MI/B200  kernel
+------------------------------------------------------------------------------------------
+1          0.00      42.98      n/a  _sparse_mla_fwd_split_dim_kernel
+2          0.00      21.39      n/a  gemm1_a4w4_port_h6144_i512_ne257_bm16_iq_sep
+3          0.00      11.38      n/a  (anonymous namespace)::topk_transform_decode_kernel((anonymous namesp...
+4          0.00       9.85      n/a  gemm2_a4w4_port_ne257_h6144_i512_bm16_atomic
+5          0.00       7.28      n/a  _ZN5aiter33reduce_scatter_cross_device_storeIDF16bLi4EEEvPNS_8RankDat...
+6          5.73       0.00     0.0x  fmhaSm100fKernel_QkvE4m3OBfloat16HQk576HV512PagedKvDenseStaticTokenSp...
+7          0.00       4.94      n/a  hgemm_bf16_16x64x256x3_SPK2_W1x2x1_BLDS1_TN_AS1_0
+8          0.00       4.68      n/a  void at::native::elementwise_kernel_manual_unroll<128, 8, at::native:...
+9          0.00       3.72      n/a  hgemm_bf16_16x64x64x6_SPK6_W1x2x1_BLDS1_TN_AS1_0
+10         0.00       3.35      n/a  _ZN5aiter25local_device_load_rmsnormIDF16bLi512ELi2ELb0EEEvNS_11RankS...
+11         0.00       3.30      n/a  hgemm_bf16_16x64x256x3_SPK2_W1x1x2_BLDS1_TN_AS1_0
+12         3.29       0.00     0.0x  bmm_Bfloat16_Bfloat16Bfloat16_Fp32_t128x64x128u2_s5_et128x64_m256x64x...
+13         0.00       3.19      n/a  _gluon_deepgemm_fp8_paged_mqa_logits_preshuffle
+14         3.13       0.00     0.0x  nvjet_sm100_tst_256x256_64x4_2x1_2cta_v_bz_TNT
+15         3.06       0.00     0.0x  ncclDevKernel_AllReduce_Sum_bf16_RING_LL(ncclDevKernelArgsStorage<409...
+
+==========================================================================================
+70K conc=4 ù Top kernels in `target_verify` (ms)
+==========================================================================================
+rank    B200 ms   MI355 ms  MI/B200  kernel
+------------------------------------------------------------------------------------------
+1          0.00      42.96      n/a  _sparse_mla_fwd_split_dim_kernel
+2         37.37       0.00     0.0x  bmm_E2m1_E2m1E2m1_Fp32_Ab16_Bb16_Cb16_t128x8x512u2_s5_et128x8_m128x8x...
+3          0.00      21.40      n/a  gemm1_a4w4_port_h6144_i512_ne257_bm16_iq_sep
+4         20.63       0.00     0.0x  bmm_Bfloat16_E2m1E2m1_Fp32_Ab16_Bb16_t128x8x512_s5_et128x8_m128x8x64_...
+5         14.65       0.00     0.0x  void flashinfer::trtllm_mnnvl_allreduce::oneshotAllreduceFusionKernel...
+6         12.61       0.00     0.0x  fmhaSm100fKernel_QkvE4m3OBfloat16HQk576HV512PagedKvDenseStaticTokenSp...
+7          0.00      11.65      n/a  (anonymous namespace)::topk_transform_decode_kernel((anonymous namesp...
+8         10.42       0.00     0.0x  nvjet_sm100_tst_64x16_64x16_4x1_v_bz_TNT
+9          0.00       9.85      n/a  gemm2_a4w4_port_ne257_h6144_i512_bm16_atomic
+10         7.75       0.00     0.0x  nvjet_sm100_tst_32x64_64x16_4x1_v_bz_splitK_TNN
+11         7.19       0.00     0.0x  void (anonymous namespace)::fused_a_gemm_kernel<1, 2624, 6144, 32, 16...
+12         6.53       0.00     0.0x  void moe::dev::routing::routingCustom::routingIndicesDynBlockKernel<m...
+13         0.00       6.08      n/a  _ZN5aiter33reduce_scatter_cross_device_storeIDF16bLi4EEEvPNS_8RankDat...
+14         5.38       0.00     0.0x  nvjet_sm100_tss_32x64_64x16_4x1_v_bz_splitK_TNN
+15         5.02       0.00     0.0x  nvjet_sm100_tst_64x8_64x16_2x2_h_bz_TNT
+
+==========================================================================================
+B200 vs MI355 category totals across all decode phases (ms)
+==========================================================================================
+
+--- 8K ---
+category           B200      MI355    MI/B200
+----------------------------------------------
+attention          79.2       11.2      0.14x
+gemm              293.6       21.3      0.07x
+comm               84.0        6.1      0.07x
+norm_rope          43.1        2.1      0.05x
+moe_topk           19.1        2.1      0.11x
+kv_cache            4.4        0.1      0.03x
+quant               5.0        0.5      0.10x
+misc_gpu            8.2        1.7      0.21x
+other              27.2        0.5      0.02x
+
+--- 70K ---
+category           B200      MI355    MI/B200
+----------------------------------------------
+attention          27.0       92.6      3.43x
+gemm              141.7      131.2      0.93x
+comm               24.4       18.4      0.75x
+norm_rope          20.5       20.8      1.02x
+moe_topk           12.1       32.9      2.71x
+kv_cache            2.4        4.1      1.73x
+quant               2.5       10.8      4.39x
+misc_gpu            3.5        5.8      1.66x
+other              13.9       12.5      0.90x

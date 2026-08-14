@@ -1,0 +1,138 @@
+B200 Multistream Kernel Analysis (conc=4)
+=========================================
+Phase windows: gpu_user_annotation on stream tid=132
+Kernels: ALL cat=kernel events, attributed by overlap with phase window
+Unit: ms/step
+
+
+Trace: glm_mtp_glm_b200_i8192_c4-1785920750.2769158-TP-0-DECODE.trace.json.gz
+Phase annotation stream tid=132
+GPU kernel streams found: [132, 136, 144, 172, 402, 448, 494] (7 streams)
+
+--- draft (10 steps, median phase=0.772 ms) ---
+  Kernel total: all-streams=0.879 ms/step | stream-132 only=0.520 ms/step | off-stream=0.359 ms/step
+  Category breakdown (ms/step) — ALL streams vs stream-132:
+    attention      all=  0.026  stream-132=  0.015
+    comm           all=  0.122  stream-132=  0.105
+    dense_gemm     all=  0.525  stream-132=  0.264
+    kv_cache       all=  0.006  stream-132=  0.004
+    moe_route      all=  0.009  stream-132=  0.005
+    norm_rope      all=  0.042  stream-132=  0.020
+    other          all=  0.117  stream-132=  0.085
+    verify_misc    all=  0.032  stream-132=  0.022
+  Per-stream kernel ms/step in `draft`:
+    tid= 132:   0.520 ms/step  top_cat=dense_gemm (annotation stream)
+    tid= 448:   0.359 ms/step  top_cat=dense_gemm
+
+--- target_verify (10 steps, median phase=12.856 ms) ---
+  Kernel total: all-streams=16.395 ms/step | stream-132 only=8.553 ms/step | off-stream=7.843 ms/step
+  Category breakdown (ms/step) — ALL streams vs stream-132:
+    attention      all=  1.302  stream-132=  0.616
+    comm           all=  2.265  stream-132=  1.621
+    dense_gemm     all= 10.077  stream-132=  4.955
+    kv_cache       all=  0.168  stream-132=  0.080
+    moe_route      all=  0.631  stream-132=  0.304
+    norm_rope      all=  0.762  stream-132=  0.376
+    other          all=  0.817  stream-132=  0.412
+    quant          all=  0.186  stream-132=  0.090
+    verify_misc    all=  0.188  stream-132=  0.098
+  Per-stream kernel ms/step in `target_verify`:
+    tid= 132:   8.553 ms/step  top_cat=dense_gemm (annotation stream)
+    tid= 402:   7.843 ms/step  top_cat=dense_gemm
+  Top moe_gemm kernels in target_verify (ALL streams):
+    (none found on any stream)
+  Top kernels on NON-132 streams in target_verify:
+    tid=402 1.642 ms/step  [dense_gemm] bmm_E2m1_E2m1E2m1_Fp32_Ab16_Bb16_Cb16_t128x8x512u2_s5_et128x8_m128x8x...
+    tid=402 0.903 ms/step  [dense_gemm] bmm_Bfloat16_E2m1E2m1_Fp32_Ab16_Bb16_t128x8x512_s5_et128x8_m128x8x64_...
+    tid=402 0.644 ms/step  [comm] void flashinfer::trtllm_mnnvl_allreduce::oneshotAllreduceFusionKernel...
+    tid=402 0.623 ms/step  [attention] fmhaSm100fKernel_QkvE4m3OBfloat16HQk576HV512PagedKvDenseStaticTokenSp...
+    tid=402 0.522 ms/step  [dense_gemm] nvjet_sm100_tst_64x16_64x16_4x1_v_bz_TNT
+    tid=402 0.348 ms/step  [dense_gemm] void (anonymous namespace)::fused_a_gemm_kernel<1, 2624, 6144, 32, 16...
+    tid=402 0.327 ms/step  [moe_route] void moe::dev::routing::routingCustom::routingIndicesDynBlockKernel<m...
+    tid=402 0.289 ms/step  [dense_gemm] nvjet_sm100_tst_32x64_64x16_4x1_v_bz_splitK_TNN
+    tid=402 0.264 ms/step  [dense_gemm] nvjet_sm100_tss_32x64_64x16_4x1_v_bz_splitK_TNN
+    tid=402 0.250 ms/step  [dense_gemm] nvjet_sm100_tst_64x8_64x16_2x2_h_bz_TNT
+
+--- draft_extend (13 steps, median phase=0.694 ms) ---
+  Kernel total: all-streams=3.797 ms/step | stream-132 only=3.478 ms/step | off-stream=0.319 ms/step
+  Category breakdown (ms/step) — ALL streams vs stream-132:
+    attention      all=  0.564  stream-132=  0.546
+    comm           all=  1.197  stream-132=  1.191
+    dense_gemm     all=  1.516  stream-132=  1.267
+    moe_route      all=  0.096  stream-132=  0.089
+    norm_rope      all=  0.175  stream-132=  0.167
+    other          all=  0.142  stream-132=  0.122
+    verify_misc    all=  0.104  stream-132=  0.096
+  Per-stream kernel ms/step in `draft_extend`:
+    tid= 132:   3.478 ms/step  top_cat=dense_gemm (annotation stream)
+    tid= 494:   0.259 ms/step  top_cat=dense_gemm
+    tid= 144:   0.042 ms/step  top_cat=dense_gemm
+    tid= 172:   0.018 ms/step  top_cat=other
+
+
+Trace: glm_mtp_glm_b200_i70000_c4-1785916708.130808-TP-0-EXTEND.trace.json.gz
+Phase annotation stream tid=132
+GPU kernel streams found: [132, 136, 144, 172, 402, 408, 448, 454, 494, 500] (10 streams)
+
+--- draft (6 steps, median phase=0.762 ms) ---
+  Kernel total: all-streams=0.891 ms/step | stream-132 only=0.548 ms/step | off-stream=0.343 ms/step
+  Category breakdown (ms/step) — ALL streams vs stream-132:
+    attention      all=  0.025  stream-132=  0.015
+    comm           all=  0.170  stream-132=  0.152
+    dense_gemm     all=  0.498  stream-132=  0.253
+    kv_cache       all=  0.006  stream-132=  0.004
+    moe_route      all=  0.009  stream-132=  0.005
+    norm_rope      all=  0.041  stream-132=  0.020
+    other          all=  0.112  stream-132=  0.080
+    verify_misc    all=  0.030  stream-132=  0.020
+  Per-stream kernel ms/step in `draft`:
+    tid= 132:   0.548 ms/step  top_cat=dense_gemm (annotation stream)
+    tid= 448:   0.296 ms/step  top_cat=dense_gemm
+    tid= 454:   0.047 ms/step  top_cat=dense_gemm
+
+--- target_verify (6 steps, median phase=12.375 ms) ---
+  Kernel total: all-streams=15.368 ms/step | stream-132 only=7.746 ms/step | off-stream=7.622 ms/step
+  Category breakdown (ms/step) — ALL streams vs stream-132:
+    attention      all=  1.357  stream-132=  0.642
+    comm           all=  1.608  stream-132=  1.001
+    dense_gemm     all=  9.491  stream-132=  4.677
+    kv_cache       all=  0.166  stream-132=  0.079
+    moe_route      all=  0.576  stream-132=  0.273
+    norm_rope      all=  0.751  stream-132=  0.370
+    other          all=  1.053  stream-132=  0.521
+    quant          all=  0.183  stream-132=  0.088
+    verify_misc    all=  0.182  stream-132=  0.094
+  Per-stream kernel ms/step in `target_verify`:
+    tid= 132:   7.746 ms/step  top_cat=dense_gemm (annotation stream)
+    tid= 402:   6.645 ms/step  top_cat=dense_gemm
+    tid= 408:   0.978 ms/step  top_cat=dense_gemm
+  Top moe_gemm kernels in target_verify (ALL streams):
+    (none found on any stream)
+  Top kernels on NON-132 streams in target_verify:
+    tid=402 1.370 ms/step  [dense_gemm] bmm_E2m1_E2m1E2m1_Fp32_Ab16_Bb16_Cb16_t128x8x512u2_s5_et128x8_m128x8x...
+    tid=402 0.759 ms/step  [dense_gemm] bmm_Bfloat16_E2m1E2m1_Fp32_Ab16_Bb16_t128x8x512_s5_et128x8_m128x8x64_...
+    tid=402 0.518 ms/step  [attention] fmhaSm100fKernel_QkvE4m3OBfloat16HQk576HV512PagedKvDenseStaticTokenSp...
+    tid=402 0.517 ms/step  [comm] void flashinfer::trtllm_mnnvl_allreduce::oneshotAllreduceFusionKernel...
+    tid=402 0.433 ms/step  [dense_gemm] nvjet_sm100_tst_64x16_64x16_4x1_v_bz_TNT
+    tid=402 0.290 ms/step  [dense_gemm] void (anonymous namespace)::fused_a_gemm_kernel<1, 2624, 6144, 32, 16...
+    tid=402 0.268 ms/step  [moe_route] void moe::dev::routing::routingCustom::routingIndicesDynBlockKernel<m...
+    tid=402 0.240 ms/step  [dense_gemm] nvjet_sm100_tst_32x64_64x16_4x1_v_bz_splitK_TNN
+    tid=402 0.219 ms/step  [dense_gemm] nvjet_sm100_tss_32x64_64x16_4x1_v_bz_splitK_TNN
+    tid=402 0.207 ms/step  [dense_gemm] nvjet_sm100_tst_64x8_64x16_2x2_h_bz_TNT
+
+--- draft_extend (7 steps, median phase=0.671 ms) ---
+  Kernel total: all-streams=4.407 ms/step | stream-132 only=4.056 ms/step | off-stream=0.352 ms/step
+  Category breakdown (ms/step) — ALL streams vs stream-132:
+    attention      all=  1.141  stream-132=  1.113
+    comm           all=  0.455  stream-132=  0.448
+    dense_gemm     all=  1.973  stream-132=  1.722
+    moe_route      all=  0.288  stream-132=  0.281
+    norm_rope      all=  0.246  stream-132=  0.236
+    other          all=  0.190  stream-132=  0.152
+    verify_misc    all=  0.112  stream-132=  0.102
+  Per-stream kernel ms/step in `draft_extend`:
+    tid= 132:   4.056 ms/step  top_cat=dense_gemm (annotation stream)
+    tid= 494:   0.237 ms/step  top_cat=dense_gemm
+    tid= 144:   0.062 ms/step  top_cat=dense_gemm
+    tid= 172:   0.027 ms/step  top_cat=other
+    tid= 500:   0.026 ms/step  top_cat=dense_gemm

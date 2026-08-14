@@ -1,0 +1,125 @@
+==========================================================================================
+B200 8k conc=4 DECODE — Multistream Analysis (dry run)
+Trace: glm_mtp_glm_b200_i8192_c4-1785920750.2769158-TP-0-DECODE.trace.json.gz
+Phase markers read from gpu_user_annotation stream tid=132
+Kernels attributed to phase windows by time overlap, grouped by executing stream tid
+==========================================================================================
+
+## Q: Why no moe_gemm on stream 132 target_verify?
+
+1) Category naming: B200 MoE uses NVFP4 BMM / NVJet kernels (bmm_e2m1, nvjet_*),
+   which match dense_gemm / moe_gemm_nv rules, NOT gemm1_a4w4/gemm2_a4w4 (MI355).
+   Prior Excel 'moe_gemm' column only keys on MI355-style kernel names.
+
+2) Multistream: MoE/comm kernels may execute on streams != 132 while phase marker
+   stays on stream 132. Single-stream view misses off-stream work.
+
+## target_verify: 10 steps on stream 132
+
+--- Kernel time by stream during target_verify (total ms, all steps) ---
+  stream     total_ms    ms/step   share%
+     132         85.5      8.553    52.2%
+     402         78.4      7.843    47.8%
+
+--- Category ms/step by stream (target_verify) ---
+category            s132      s402
+----------------------------------
+attention          0.616     0.686
+comm               1.621     0.644
+dense_gemm         1.718     1.785
+kv_cache           0.080     0.088
+moe_gemm_nv        3.465     3.581
+moe_route          0.304     0.327
+norm_rope          0.376     0.385
+other              0.275     0.257
+verify_misc        0.098     0.090
+
+--- MoE-related kernel time (target_verify, ms/step) ---
+  stream 132  moe_gemm (MI355 keys):     0.000
+  stream 132  moe_gemm_nv (B200 MoE):    3.465
+  stream 132  dense_gemm (rest):         1.718
+  ALL streams          moe_gemm (MI355 keys):     0.000
+  ALL streams          moe_gemm_nv (B200 MoE):    7.046
+  ALL streams          dense_gemm:                  3.503
+
+## All phases — all streams kernel sum (ms/step)
+
+### draft (10 steps)
+  phase median (stream 132): 0.772 ms
+  kernel sum all streams: 0.879 ms/step
+  kernel sum stream 132 only: 0.520 ms/step
+  off-stream kernel: 0.359 ms/step
+  category (all streams):
+    moe_gemm_nv    0.303 ms/step
+    dense_gemm     0.232 ms/step
+    comm           0.122 ms/step
+    other          0.107 ms/step
+    norm_rope      0.042 ms/step
+    verify_misc    0.032 ms/step
+    attention      0.026 ms/step
+    moe_route      0.009 ms/step
+    kv_cache       0.006 ms/step
+
+### target_verify (10 steps)
+  phase median (stream 132): 12.856 ms
+  kernel sum all streams: 16.395 ms/step
+  kernel sum stream 132 only: 8.553 ms/step
+  off-stream kernel: 7.843 ms/step
+  category (all streams):
+    moe_gemm_nv    7.046 ms/step
+    dense_gemm     3.503 ms/step
+    comm           2.265 ms/step
+    attention      1.302 ms/step
+    norm_rope      0.762 ms/step
+    moe_route      0.631 ms/step
+    other          0.531 ms/step
+    verify_misc    0.188 ms/step
+    kv_cache       0.168 ms/step
+
+### draft_extend (13 steps)
+  phase median (stream 132): 0.694 ms
+  kernel sum all streams: 3.797 ms/step
+  kernel sum stream 132 only: 3.478 ms/step
+  off-stream kernel: 0.319 ms/step
+  category (all streams):
+    comm           1.197 ms/step
+    moe_gemm_nv    0.809 ms/step
+    dense_gemm     0.763 ms/step
+    attention      0.564 ms/step
+    norm_rope      0.175 ms/step
+    verify_misc    0.104 ms/step
+    moe_route      0.096 ms/step
+    other          0.086 ms/step
+    kv_cache       0.003 ms/step
+
+==========================================================================================
+Top kernels per stream — target_verify (ms/step)
+==========================================================================================
+
+### stream tid=132  total=8.553 ms/step
+    1.567 ms/step  [moe_gemm_nv]  bmm_E2m1_E2m1E2m1_Fp32_Ab16_Bb16_Cb16_t128x8x512u2_s...
+    1.031 ms/step  [comm]  void (anonymous namespace)::all_reduce_kernel<(anony...
+    0.859 ms/step  [dense_gemm]  bmm_Bfloat16_E2m1E2m1_Fp32_Ab16_Bb16_t128x8x512_s5_e...
+    0.590 ms/step  [comm]  void flashinfer::trtllm_mnnvl_allreduce::oneshotAllr...
+    0.560 ms/step  [attention]  fmhaSm100fKernel_QkvE4m3OBfloat16HQk576HV512PagedKvD...
+    0.461 ms/step  [moe_gemm_nv]  nvjet_sm100_tst_64x16_64x16_4x1_v_bz_TNT
+    0.332 ms/step  [dense_gemm]  void (anonymous namespace)::fused_a_gemm_kernel<1, 2...
+    0.316 ms/step  [moe_gemm_nv]  nvjet_sm100_tst_32x64_64x16_4x1_v_bz_splitK_TNN
+    0.304 ms/step  [moe_route]  void moe::dev::routing::routingCustom::routingIndice...
+    0.242 ms/step  [moe_gemm_nv]  nvjet_sm100_tss_32x64_64x16_4x1_v_bz_splitK_TNN
+    0.225 ms/step  [moe_gemm_nv]  nvjet_sm100_tst_64x8_64x16_2x2_h_bz_TNT
+    0.217 ms/step  [dense_gemm]  void (anonymous namespace)::fused_a_gemm_kernel<1, 4...
+
+### stream tid=402  total=7.843 ms/step
+    1.642 ms/step  [moe_gemm_nv]  bmm_E2m1_E2m1E2m1_Fp32_Ab16_Bb16_Cb16_t128x8x512u2_s...
+    0.903 ms/step  [dense_gemm]  bmm_Bfloat16_E2m1E2m1_Fp32_Ab16_Bb16_t128x8x512_s5_e...
+    0.644 ms/step  [comm]  void flashinfer::trtllm_mnnvl_allreduce::oneshotAllr...
+    0.623 ms/step  [attention]  fmhaSm100fKernel_QkvE4m3OBfloat16HQk576HV512PagedKvD...
+    0.522 ms/step  [moe_gemm_nv]  nvjet_sm100_tst_64x16_64x16_4x1_v_bz_TNT
+    0.348 ms/step  [dense_gemm]  void (anonymous namespace)::fused_a_gemm_kernel<1, 2...
+    0.327 ms/step  [moe_route]  void moe::dev::routing::routingCustom::routingIndice...
+    0.289 ms/step  [moe_gemm_nv]  nvjet_sm100_tst_32x64_64x16_4x1_v_bz_splitK_TNN
+    0.264 ms/step  [moe_gemm_nv]  nvjet_sm100_tss_32x64_64x16_4x1_v_bz_splitK_TNN
+    0.250 ms/step  [moe_gemm_nv]  nvjet_sm100_tst_64x8_64x16_2x2_h_bz_TNT
+    0.227 ms/step  [dense_gemm]  void (anonymous namespace)::fused_a_gemm_kernel<1, 4...
+    0.168 ms/step  [moe_gemm_nv]  nvjet_sm100_tst_128x8_64x12_2x2_h_bz_TNT

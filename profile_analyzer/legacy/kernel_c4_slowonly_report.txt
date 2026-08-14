@@ -1,0 +1,11 @@
+﻿python :   File "C:\Users\jiaryang\OneDrive - Advanced Micro Devices Inc\2_task\61_sglang_glm\2_70k_profile_MTP\analyze
+_kernel_c4_slowonly.py", line 22
+At C:\Users\jiaryang\AppData\Local\Temp\ps-script-99a09706-50a8-4dfb-b9f1-6c21c3cd81c5.ps1:115 char:1
++ python "C:\Users\jiaryang\OneDrive - Advanced Micro Devices Inc\2_tas ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (  File "C:\User...ly.py", line 22:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+    ]
+    ^
+SyntaxError: closing parenthesis ']' does not match opening parenthesis '{' on line 17

@@ -1,0 +1,220 @@
+﻿Loaded ('8k', 'b200'): glm_mtp_glm_b200_i8192_c4-1785920750.2769158-TP-0-DECODE.trace.json.gz
+Loaded ('8k', 'mi355'): glm_mtp_glm_mi355_i8192_c4-1786058894.8985496-TP-0-DECODE.trace.json.gz
+Loaded ('70k', 'b200'): glm_mtp_glm_b200_i70000_c4-1785916708.130808-TP-0-EXTEND.trace.json.gz
+Loaded ('70k', 'mi355'): glm_mtp_glm_mi355_i70000_c4-1785918338.6063445-TP-0-EXTEND.trace.json.gz
+
+=== Per-step analysis (outliers > 100ms excluded) ===
+Per-step = total / #phase_steps (clean phase marker count)
+
+============================================================================================
+8K conc=4 ù Phase marker per-step (ms/step)
+============================================================================================
+GPU    phase          #steps   total_ms   per_step
+----------------------------------------------------
+b200   draft              30      42.86      1.429
+b200   target_verify      30     325.31     10.844
+b200   draft_extend       36     148.10      4.114
+mi355  draft              20      26.53      1.327
+mi355  target_verify      20     217.19     10.859
+mi355  draft_extend       20     296.38     14.819
+
+8K conc=4 ù Kernel per-step by category (ms/step)
+GPU/phase             attention     gemm     commnorm_rope moe_topk kv_cache    quant misc_gpu    other    TOTAL  #steps
+------------------------------------------------------------------------------------------------------------------------
+b200/draft             0.177    0.520    0.156    0.067    0.022    0.008    0.003    0.028    0.066    1.046      30
+b200/target_verify     1.249    7.348    1.472    1.087    0.424    0.127    0.144    0.161    0.719   12.731      30
+b200/draft_extend      1.012    1.600    0.975    0.236    0.160    0.009    0.017    0.069    0.102    4.181      36
+mi355/draft             0.016    0.336    0.010    0.035    0.015    0.004    0.000    0.156    0.219    0.791      20
+mi355/target_verify     3.125    4.864    0.636    0.817    0.561    0.148    0.390    0.097    0.175   10.812      20
+mi355/draft_extend      3.119    5.157    0.626    0.816    0.568    0.142    0.389    0.158    0.241   11.217      20
+
+8K conc=4 ù B200 vs MI355 kernel per-step ratio
+phase/category               B200    MI355  MI/B200
+----------------------------------------------------
+draft TOTAL                 1.046    0.791    0.76x
+  attention                 0.177    0.016    0.09x
+  gemm                      0.520    0.336    0.65x
+  comm                      0.156    0.010    0.06x
+  norm_rope                 0.067    0.035    0.53x
+  moe_topk                  0.022    0.015    0.65x
+  misc_gpu                  0.028    0.156    5.62x
+  other                     0.066    0.219    3.32x
+target_verify TOTAL        12.731   10.812    0.85x
+  attention                 1.249    3.125    2.50x
+  gemm                      7.348    4.864    0.66x
+  comm                      1.472    0.636    0.43x
+  norm_rope                 1.087    0.817    0.75x
+  moe_topk                  0.424    0.561    1.32x
+  kv_cache                  0.127    0.148    1.17x
+  quant                     0.144    0.390    2.71x
+  misc_gpu                  0.161    0.097    0.60x
+  other                     0.719    0.175    0.24x
+draft_extend TOTAL          4.181   11.217    2.68x
+  attention                 1.012    3.119    3.08x
+  gemm                      1.600    5.157    3.22x
+  comm                      0.975    0.626    0.64x
+  norm_rope                 0.236    0.816    3.45x
+  moe_topk                  0.160    0.568    3.55x
+  kv_cache                  0.009    0.142   15.50x
+  quant                     0.017    0.389   22.74x
+  misc_gpu                  0.069    0.158    2.27x
+  other                     0.102    0.241    2.37x
+
+8K conc=4 ù Top kernels per-step in `draft` (ms/step)
+#       B200    MI355  MI/B200  kernel
+----------------------------------------------------------------------------------------
+1      0.131    0.000    0.00x  fmhaSm100fKernel_QkvE4m3OBfloat16HQk576HV512PagedKvDenseStaticToken...
+2      0.114    0.000    0.00x  void (anonymous namespace)::all_reduce_kernel<(anonymous namespace)...
+3      0.000    0.108      n/a  Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x16x128_MI16x16x1...
+4      0.080    0.000    0.00x  nvjet_sm100_tst_192x8_64x8_2x1_v_bz_splitK_TNT
+5      0.079    0.000    0.00x  bmm_Bfloat16_Bfloat16Bfloat16_Fp32_t128x8x128u2_s6_et128x8_m128x8x1...
+6      0.000    0.073      n/a  _ZN2ck15kernel_moe_gemmINS_15GridwiseMoeGemmINS_13tensor_layout4gem...
+7      0.000    0.065      n/a  _ZN5aiter26cross_device_reduce_1stageIDF16bLi4ELb0EEEvPNS_8RankData...
+8      0.051    0.000    0.00x  bmm_E2m1_E2m1E2m1_Fp32_Ab16_Bb16_Cb16_t128x8x512u2_s5_et128x8_m128x...
+9      0.000    0.051      n/a  void at::native::(anonymous namespace)::cunn_SoftMaxForwardGmem<4, ...
+10     0.000    0.047      n/a  void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, ...
+11     0.000    0.041      n/a  hgemm_bf16_16x128x128x3_SPK4_W1x4x1_BLDS1_TN_AS1_0
+12     0.039    0.000    0.00x  nvjet_sm100_tst_64x8_64x16_4x1_v_bz_TNT
+
+8K conc=4 ù Top kernels per-step in `target_verify` (ms/step)
+#       B200    MI355  MI/B200  kernel
+----------------------------------------------------------------------------------------
+1      0.000    3.054      n/a  _sparse_mla_fwd_split_dim_kernel
+2      2.406    0.000    0.00x  bmm_E2m1_E2m1E2m1_Fp32_Ab16_Bb16_Cb16_t128x8x512u2_s5_et128x8_m128x...
+3      0.000    1.770      n/a  gemm1_a4w4_port_h6144_i512_ne257_bm16_iq_sep
+4      1.319    0.000    0.00x  bmm_Bfloat16_E2m1E2m1_Fp32_Ab16_Bb16_t128x8x512_s5_et128x8_m128x8x6...
+5      0.925    0.000    0.00x  void flashinfer::trtllm_mnnvl_allreduce::oneshotAllreduceFusionKern...
+6      0.884    0.000    0.00x  fmhaSm100fKernel_QkvE4m3OBfloat16HQk576HV512PagedKvDenseStaticToken...
+7      0.000    0.848      n/a  gemm2_a4w4_port_ne257_h6144_i512_bm16_atomic
+8      0.734    0.000    0.00x  nvjet_sm100_tst_64x16_64x16_4x1_v_bz_TNT
+9      0.000    0.633      n/a  _ZN5aiter33reduce_scatter_cross_device_storeIDF16bLi4EEEvPNS_8RankD...
+10     0.506    0.000    0.00x  void (anonymous namespace)::fused_a_gemm_kernel<1, 2624, 6144, 32, ...
+11     0.000    0.490      n/a  hgemm_bf16_16x64x256x3_SPK2_W1x2x1_BLDS1_TN_AS1_0
+12     0.472    0.000    0.00x  void moe::dev::routing::routingCustom::routingIndicesDynBlockKernel...
+
+8K conc=4 ù Top kernels per-step in `draft_extend` (ms/step)
+#       B200    MI355  MI/B200  kernel
+----------------------------------------------------------------------------------------
+1      0.000    3.051      n/a  _sparse_mla_fwd_split_dim_kernel
+2      0.000    1.768      n/a  gemm1_a4w4_port_h6144_i512_ne257_bm16_iq_sep
+3      0.919    0.000    0.00x  fmhaSm100fKernel_QkvE4m3OBfloat16HQk576HV512PagedKvDenseStaticToken...
+4      0.865    0.000    0.00x  ncclDevKernel_AllReduce_Sum_bf16_RING_LL(ncclDevKernelArgsStorage<4...
+5      0.000    0.847      n/a  gemm2_a4w4_port_ne257_h6144_i512_bm16_atomic
+6      0.000    0.626      n/a  _ZN5aiter33reduce_scatter_cross_device_storeIDF16bLi4EEEvPNS_8RankD...
+7      0.000    0.490      n/a  hgemm_bf16_16x64x256x3_SPK2_W1x2x1_BLDS1_TN_AS1_0
+8      0.000    0.374      n/a  hgemm_bf16_16x64x64x6_SPK6_W1x2x1_BLDS1_TN_AS1_0
+9      0.000    0.340      n/a  hgemm_bf16_16x64x256x3_SPK2_W1x1x2_BLDS1_TN_AS1_0
+10     0.000    0.336      n/a  void at::native::elementwise_kernel_manual_unroll<128, 8, at::nativ...
+11     0.000    0.334      n/a  _ZN5aiter25local_device_load_rmsnormIDF16bLi512ELi2ELb0EEEvNS_11Ran...
+12     0.298    0.000    0.00x  nvjet_sm100_tst_128x256_64x6_2x1_2cta_v_bz_TNT
+============================================================================================
+70K conc=4 ù Phase marker per-step (ms/step)
+============================================================================================
+GPU    phase          #steps   total_ms   per_step
+----------------------------------------------------
+b200   draft              18      16.75      0.931
+b200   target_verify      18     161.30      8.961
+b200   draft_extend       19      41.77      2.198
+mi355  draft              14      18.37      1.312
+mi355  target_verify      14     155.61     11.115
+mi355  draft_extend       14     203.46     14.533
+
+70K conc=4 ù Kernel per-step by category (ms/step)
+GPU/phase             attention     gemm     commnorm_rope moe_topk kv_cache    quant misc_gpu    other    TOTAL  #steps
+------------------------------------------------------------------------------------------------------------------------
+b200/draft             0.046    0.457    0.105    0.058    0.026    0.007    0.004    0.026    0.064    0.793      18
+b200/target_verify     0.957    6.320    0.973    0.933    0.472    0.117    0.129    0.126    0.626   10.655      18
+b200/draft_extend      0.471    1.038    0.265    0.139    0.166    0.006    0.004    0.040    0.079    2.209      19
+mi355/draft             0.013    0.314    0.008    0.030    0.015    0.002    0.000    0.151    0.276    0.810      14
+mi355/target_verify     3.305    4.419    0.603    0.734    1.171    0.149    0.388    0.104    0.194   11.067      14
+mi355/draft_extend      3.298    4.638    0.704    0.723    1.162    0.140    0.387    0.160    0.427   11.640      14
+
+70K conc=4 ù B200 vs MI355 kernel per-step ratio
+phase/category               B200    MI355  MI/B200
+----------------------------------------------------
+draft TOTAL                 0.793    0.810    1.02x
+  attention                 0.046    0.013    0.29x
+  gemm                      0.457    0.314    0.69x
+  comm                      0.105    0.008    0.08x
+  norm_rope                 0.058    0.030    0.52x
+  moe_topk                  0.026    0.015    0.58x
+  misc_gpu                  0.026    0.151    5.74x
+  other                     0.064    0.276    4.32x
+target_verify TOTAL        10.655   11.067    1.04x
+  attention                 0.957    3.305    3.45x
+  gemm                      6.320    4.419    0.70x
+  comm                      0.973    0.603    0.62x
+  norm_rope                 0.933    0.734    0.79x
+  moe_topk                  0.472    1.171    2.48x
+  kv_cache                  0.117    0.149    1.27x
+  quant                     0.129    0.388    3.01x
+  misc_gpu                  0.126    0.104    0.83x
+  other                     0.626    0.194    0.31x
+draft_extend TOTAL          2.209   11.640    5.27x
+  attention                 0.471    3.298    7.01x
+  gemm                      1.038    4.638    4.47x
+  comm                      0.265    0.704    2.66x
+  norm_rope                 0.139    0.723    5.21x
+  moe_topk                  0.166    1.162    6.99x
+  kv_cache                  0.006    0.140   22.28x
+  quant                     0.004    0.387   86.14x
+  misc_gpu                  0.040    0.160    3.99x
+  other                     0.079    0.427    5.38x
+
+70K conc=4 ù Top kernels per-step in `draft` (ms/step)
+#       B200    MI355  MI/B200  kernel
+----------------------------------------------------------------------------------------
+1      0.000    0.130      n/a  _ZN5aiter26cross_device_reduce_1stageIDF16bLi4ELb0EEEvPNS_8RankData...
+2      0.000    0.108      n/a  Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x16x128_MI16x16x1...
+3      0.078    0.000    0.00x  nvjet_sm100_tst_192x8_64x8_2x1_v_bz_splitK_TNT
+4      0.000    0.073      n/a  _ZN2ck15kernel_moe_gemmINS_15GridwiseMoeGemmINS_13tensor_layout4gem...
+5      0.070    0.000    0.00x  void (anonymous namespace)::all_reduce_kernel<(anonymous namespace)...
+6      0.062    0.000    0.00x  bmm_Bfloat16_Bfloat16Bfloat16_Fp32_t128x8x128u2_s6_et128x8_m128x8x1...
+7      0.055    0.000    0.00x  bmm_E2m1_E2m1E2m1_Fp32_Ab16_Bb16_Cb16_t128x8x512u2_s5_et128x8_m128x...
+8      0.000    0.051      n/a  void at::native::(anonymous namespace)::cunn_SoftMaxForwardGmem<4, ...
+9      0.000    0.037      n/a  hgemm_bf16_16x128x128x3_SPK4_W1x4x1_BLDS1_TN_AS1_0
+10     0.000    0.037      n/a  void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, ...
+11     0.037    0.000    0.00x  nvjet_sm100_tst_64x8_64x16_4x1_v_bz_TNT
+12     0.035    0.000    0.00x  void flashinfer::trtllm_mnnvl_allreduce::oneshotAllreduceFusionKern...
+
+70K conc=4 ù Top kernels per-step in `target_verify` (ms/step)
+#       B200    MI355  MI/B200  kernel
+----------------------------------------------------------------------------------------
+1      0.000    3.069      n/a  _sparse_mla_fwd_split_dim_kernel
+2      2.076    0.000    0.00x  bmm_E2m1_E2m1E2m1_Fp32_Ab16_Bb16_Cb16_t128x8x512u2_s5_et128x8_m128x...
+3      0.000    1.528      n/a  gemm1_a4w4_port_h6144_i512_ne257_bm16_iq_sep
+4      1.146    0.000    0.00x  bmm_Bfloat16_E2m1E2m1_Fp32_Ab16_Bb16_t128x8x512_s5_et128x8_m128x8x6...
+5      0.000    0.832      n/a  (anonymous namespace)::topk_transform_decode_kernel((anonymous name...
+6      0.814    0.000    0.00x  void flashinfer::trtllm_mnnvl_allreduce::oneshotAllreduceFusionKern...
+7      0.000    0.704      n/a  gemm2_a4w4_port_ne257_h6144_i512_bm16_atomic
+8      0.701    0.000    0.00x  fmhaSm100fKernel_QkvE4m3OBfloat16HQk576HV512PagedKvDenseStaticToken...
+9      0.579    0.000    0.00x  nvjet_sm100_tst_64x16_64x16_4x1_v_bz_TNT
+10     0.000    0.434      n/a  _ZN5aiter33reduce_scatter_cross_device_storeIDF16bLi4EEEvPNS_8RankD...
+11     0.431    0.000    0.00x  nvjet_sm100_tst_32x64_64x16_4x1_v_bz_splitK_TNN
+12     0.399    0.000    0.00x  void (anonymous namespace)::fused_a_gemm_kernel<1, 2624, 6144, 32, ...
+
+70K conc=4 ù Top kernels per-step in `draft_extend` (ms/step)
+#       B200    MI355  MI/B200  kernel
+----------------------------------------------------------------------------------------
+1      0.000    3.070      n/a  _sparse_mla_fwd_split_dim_kernel
+2      0.000    1.528      n/a  gemm1_a4w4_port_h6144_i512_ne257_bm16_iq_sep
+3      0.000    0.813      n/a  (anonymous namespace)::topk_transform_decode_kernel((anonymous name...
+4      0.000    0.704      n/a  gemm2_a4w4_port_ne257_h6144_i512_bm16_atomic
+5      0.000    0.520      n/a  _ZN5aiter33reduce_scatter_cross_device_storeIDF16bLi4EEEvPNS_8RankD...
+6      0.000    0.353      n/a  hgemm_bf16_16x64x256x3_SPK2_W1x2x1_BLDS1_TN_AS1_0
+7      0.000    0.334      n/a  void at::native::elementwise_kernel_manual_unroll<128, 8, at::nativ...
+8      0.301    0.000    0.00x  fmhaSm100fKernel_QkvE4m3OBfloat16HQk576HV512PagedKvDenseStaticToken...
+9      0.000    0.266      n/a  hgemm_bf16_16x64x64x6_SPK6_W1x2x1_BLDS1_TN_AS1_0
+10     0.000    0.239      n/a  _ZN5aiter25local_device_load_rmsnormIDF16bLi512ELi2ELb0EEEvNS_11Ran...
+11     0.000    0.236      n/a  hgemm_bf16_16x64x256x3_SPK2_W1x1x2_BLDS1_TN_AS1_0
+12     0.000    0.228      n/a  _gluon_deepgemm_fp8_paged_mqa_logits_preshuffle
+
+============================================================================================
+Cross-workload summary ù decode path per-step (phase marker, ms/step)
+============================================================================================
+workload GPU       draft   t_verify   d_extend      sum
+--------------------------------------------------------
+8k       b200      1.429     10.844      4.114   16.386
+8k       mi355     1.327     10.859     14.819   27.005
+70k      b200      0.931      8.961      2.198   12.090
+70k      mi355     1.312     11.115     14.533   26.960
