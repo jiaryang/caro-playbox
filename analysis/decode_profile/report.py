@@ -39,7 +39,7 @@ def build_readme(side_a, side_b, classifier, graph_off=None) -> pd.DataFrame:
         ("overlap factor", "kernel ms/step divided by wall ms/step; above 1.0 means streams run concurrently"),
         ("non-kernel gap", "wall ms/step minus kernel ms/step; GPU idle inside the phase"),
         ("Kernel categories", classifier.rules_path),
-        ("Units", "ms per decode step, median wall, 2 decimals"),
+        ("Units", "ms per decode step, mean after wall-outlier filter, 2 decimals"),
     ]
     for side in (side_a, side_b):
         rows.append(

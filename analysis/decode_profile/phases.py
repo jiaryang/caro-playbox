@@ -4,6 +4,10 @@ A phase can be annotated on several GPU streams at once (B200 runs
 target_verify on two), so windows are merged across streams before anything is
 measured. Kernel time is then summed over every stream inside those windows,
 which is what makes the kernel sum exceed the wall clock when streams overlap.
+
+Aggregation is mean over steady-state windows only. Outlier windows (wall >
+``OUTLIER_WALL_FACTOR`` × median wall) are dropped first so a single stalled
+all-reduce cannot inflate mean kernel while median wall stayed small.
 """
 
 from __future__ import annotations
@@ -15,6 +19,10 @@ from dataclasses import dataclass, field
 
 from .trace import Trace
 
+# Drop windows whose wall exceeds this × median(wall). 3× is enough to keep
+# mild jitter (e.g. 47 vs 41 ms) while rejecting stalls (289 ms, 4 s).
+OUTLIER_WALL_FACTOR = 3.0
+
 
 @dataclass
 class PhaseStats:
@@ -22,6 +30,7 @@ class PhaseStats:
     n_steps: int
     wall_ms: float = 0.0
     kernel_ms: float = 0.0
+    n_outliers: int = 0
     per_stream_ms: dict = field(default_factory=dict)
     per_kernel_ms: dict = field(default_factory=dict)
     per_kernel_calls: dict = field(default_factory=dict)
@@ -70,6 +79,18 @@ def _kernels_in_window(tr: Trace, start: float, end: float):
         i -= 1
 
 
+def _keep_window_indices(walls_us, factor: float = OUTLIER_WALL_FACTOR) -> list[int]:
+    """Indices whose wall is within ``factor`` × median wall (always keep ≥1)."""
+    if not walls_us:
+        return []
+    med = statistics.median(walls_us)
+    if med <= 0:
+        return list(range(len(walls_us)))
+    thresh = med * factor
+    kept = [i for i, w in enumerate(walls_us) if w <= thresh]
+    return kept if kept else [min(range(len(walls_us)), key=lambda i: walls_us[i])]
+
+
 def analyze_phases(tr: Trace, classifier) -> dict:
     """-> {phase: PhaseStats} using GPU-side markers from every stream."""
     by_phase = defaultdict(list)
@@ -79,29 +100,36 @@ def analyze_phases(tr: Trace, classifier) -> dict:
     results = {}
     for phase in tr.phases:
         windows = merge_windows(by_phase.get(phase, []))
-        n = len(windows)
-        stats = PhaseStats(phase=phase, n_steps=n, windows=windows)
-        if not n:
+        n_raw = len(windows)
+        stats = PhaseStats(phase=phase, n_steps=n_raw, windows=windows)
+        if not n_raw:
             results[phase] = stats
             continue
 
-        stats.wall_ms = statistics.median((e - s) / 1000.0 for s, e in windows)
+        walls_us = [end - start for start, end in windows]
+        kept = _keep_window_indices(walls_us)
+        stats.n_outliers = n_raw - len(kept)
+        n = len(kept)  # timing divisor; n_steps stays raw for validate
 
         per_stream = defaultdict(float)
         per_kernel = defaultdict(float)
         per_calls = defaultdict(int)
         per_category = defaultdict(float)
-        total_us = 0.0
-        for start, end in windows:
+        total_wall_us = 0.0
+        total_kern_us = 0.0
+        for idx in kept:
+            start, end = windows[idx]
+            total_wall_us += walls_us[idx]
             for i, overlap in _kernels_in_window(tr, start, end):
                 name = tr.k_names[i]
-                total_us += overlap
+                total_kern_us += overlap
                 per_stream[tr.k_tids[i]] += overlap
                 per_kernel[name] += overlap
                 per_calls[name] += 1
                 per_category[classifier.classify(name)] += overlap
 
-        stats.kernel_ms = total_us / 1000.0 / n
+        stats.wall_ms = total_wall_us / 1000.0 / n
+        stats.kernel_ms = total_kern_us / 1000.0 / n
         stats.per_stream_ms = {t: v / 1000.0 / n for t, v in per_stream.items()}
         stats.per_kernel_ms = {k: v / 1000.0 / n for k, v in per_kernel.items()}
         stats.per_kernel_calls = {k: v / n for k, v in per_calls.items()}

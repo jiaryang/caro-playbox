@@ -60,7 +60,11 @@ def build_readme(runs, label, classifier, source: str) -> pd.DataFrame:
         ("Report", "Single-side hierarchical decode profile"),
         ("Label", label),
         ("Source", source),
-        ("Timing", "CUDA-graph-ON DECODE traces; median phase wall, ms/step"),
+        (
+            "Timing",
+            "CUDA-graph-ON DECODE; mean over windows with wall ≤ 3× median "
+            "(outlier stalls dropped); ms/step",
+        ),
         ("Layers", "decode totals → phases → kernel categories → top kernels"),
         ("Phases detected", ", ".join(phases) if phases else "(none)"),
         ("MTP expected phases", "draft, target_verify, draft_extend"),
@@ -220,9 +224,11 @@ def print_hierarchy(runs, label: str) -> None:
         )
         for phase in ordered_phases(r.stats):
             st = r.stats[phase]
+            drop = f"  drop={st.n_outliers}" if st.n_outliers else ""
             print(
                 f"    [{phase}] wall={st.wall_ms:.2f}  kern={st.kernel_ms:.2f}  "
                 f"overlap={st.overlap_factor:.2f}  gap={st.non_kernel_gap_ms:.2f}"
+                f"{drop}"
             )
             cats = sorted(st.per_category_ms.items(), key=lambda kv: -kv[1])[:8]
             for cat, ms in cats:

@@ -161,7 +161,7 @@ def build_readme(pairs, label_a, label_b, classifier, dir_a, dir_b, phases) -> p
         ("non-kernel gap", "wall ms/step minus kernel ms/step; GPU idle inside the phase"),
         ("wall per request", "decode wall ms/step divided by bs; lower is better at equal bs"),
         ("Kernel categories", classifier.rules_path),
-        ("Units", "ms per decode step, median wall, 2 decimals"),
+        ("Units", "ms per decode step, mean after wall-outlier filter, 2 decimals"),
     ]
     for conc, a, b in pairs:
         rows.append((f"c{conc} {label_a} trace", a.basename))
