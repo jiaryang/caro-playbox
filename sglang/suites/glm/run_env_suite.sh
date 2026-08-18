@@ -32,6 +32,8 @@ SWEEP_BENCH="${LIB_DIR}/sweep_bench.sh"
 RECIPE_GLM="${SGLANG_DIR}/recipes/glm.sh"
 PROFILE_ANALYZER_ROOT_DEFAULT="${REPO_ROOT}/analysis"
 
+# shellcheck source=../../lib/bench_common.sh
+source "${LIB_DIR}/bench_common.sh"
 # shellcheck source=../../recipes/glm.sh
 source "$RECIPE_GLM"
 
@@ -52,8 +54,10 @@ IO matrix:
   70000:300     perf only (--max-running-requests)
 
 Options:
-  --model PATH                 model path  (default: amd/GLM-5.2-MXFP4)
+  --model PATH                 model path  (default: vendor auto
+                               amd/GLM-5.2-MXFP4 | nvidia/GLM-5.2-NVFP4)
   --model-key KEY              passed to sweep_bench  (default: glm)
+  --gpu-vendor VENDOR          cuda | amd  (default: auto-detect)
   --gpus LIST                  CUDA_VISIBLE_DEVICES  (default: 4,5,6,7)
   --tp N                       tensor parallel size  (default: 4)
   --host HOST                  server host  (default: 127.0.0.1)
@@ -107,8 +111,9 @@ Environment (set before launch if unset):
 EOF
 }
 
-MODEL="amd/GLM-5.2-MXFP4"
+MODEL=""                      # resolve after --gpu-vendor / auto-detect
 MODEL_KEY="glm"
+GPU_VENDOR=""                 # cuda | amd; empty -> auto-detect
 GPUS="4,5,6,7"
 TP="4"
 HOST="127.0.0.1"
@@ -160,6 +165,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --model)              MODEL="$2"; shift 2 ;;
     --model-key)          MODEL_KEY="$2"; shift 2 ;;
+    --gpu-vendor)         GPU_VENDOR="$2"; shift 2 ;;
     --gpus)               GPUS="$2"; shift 2 ;;
     --tp)                 TP="$2"; shift 2 ;;
     --host)               HOST="$2"; shift 2 ;;
@@ -241,6 +247,25 @@ if [[ "$ONLY_NOMTP" == true && "$ONLY_MTP" == true ]]; then
   echo "ERROR: --only-nomtp and --only-mtp are mutually exclusive" >&2
   exit 1
 fi
+
+# Resolve GPU vendor + default model (AMD MXFP4 / NVIDIA NVFP4).
+if [[ -z "$GPU_VENDOR" ]]; then
+  GPU_VENDOR="$(detect_gpu_vendor)"
+fi
+case "$GPU_VENDOR" in
+  cuda|amd) ;;
+  nv|nvidia) GPU_VENDOR="cuda" ;;
+  rocm) GPU_VENDOR="amd" ;;
+  *)
+    echo "ERROR: unknown or undetected GPU_VENDOR='${GPU_VENDOR}' (set --gpu-vendor cuda|amd)" >&2
+    exit 1
+    ;;
+esac
+if [[ -n "$MODEL" ]]; then
+  MODEL_OVERRIDE="$MODEL"
+fi
+bench_resolve_model
+
 if [[ -n "$SUITE_DIR_OVERRIDE" && ! -d "$SUITE_DIR_OVERRIDE" ]]; then
   echo "ERROR: --suite-dir does not exist: ${SUITE_DIR_OVERRIDE}" >&2
   exit 1
@@ -306,11 +331,16 @@ setup_env() {
   export HF_HOME="${HF_HOME:-$HF_HOME_DEFAULT}"
   export HF_HUB_CACHE="${HF_HUB_CACHE:-${HF_HOME}/hub}"
   export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-${HF_HOME}/hub}"
-  export SGLANG_ROCM_FUSED_DECODE_MLA="${SGLANG_ROCM_FUSED_DECODE_MLA:-0}"
-  export ROCM_QUICK_REDUCE_QUANTIZATION="${ROCM_QUICK_REDUCE_QUANTIZATION:-INT4}"
-  export SGLANG_OPT_USE_TOPK_V2="${SGLANG_OPT_USE_TOPK_V2:-0}"
   export PYTHONPATH="${SGLANG_ROOT}/python${PYTHONPATH:+:${PYTHONPATH}}"
   export CUDA_VISIBLE_DEVICES="$GPUS"
+  export PYTHONNOUSERSITE="${PYTHONNOUSERSITE:-1}"
+  case "$GPU_VENDOR" in
+    amd)
+      export SGLANG_ROCM_FUSED_DECODE_MLA="${SGLANG_ROCM_FUSED_DECODE_MLA:-0}"
+      export ROCM_QUICK_REDUCE_QUANTIZATION="${ROCM_QUICK_REDUCE_QUANTIZATION:-INT4}"
+      export SGLANG_OPT_USE_TOPK_V2="${SGLANG_OPT_USE_TOPK_V2:-0}"
+      ;;
+  esac
 }
 
 base_server_args() {
@@ -596,6 +626,7 @@ run_sweep() {
     --model-key "$MODEL_KEY"
     --mode "$mode"
     --model-override "$MODEL"
+    --gpu-vendor "$GPU_VENDOR"
     --server-host "$HOST"
     --server-port "$PORT"
     --sglang-root "$SGLANG_ROOT"
@@ -1038,6 +1069,7 @@ write_manifest() {
     echo "want_acc=${WANT_ACC} want_perf=${WANT_PERF} want_profile=${WANT_PROFILE} want_analyze=${WANT_ANALYZE}"
     echo "model=${MODEL}"
     echo "model_key=${MODEL_KEY}"
+    echo "gpu_vendor=${GPU_VENDOR}"
     echo "gpus=${GPUS}"
     echo "tp=${TP}"
     echo "host=${HOST}:${PORT}"
@@ -1105,7 +1137,7 @@ main() {
   log "=== GLM env suite start ==="
   log "Suite dir: ${SUITE_ROOT}"
   log "phases=${PHASES}  dry-run=${DRY_RUN}"
-  log "Model=${MODEL}  GPUS=${GPUS}  TP=${TP}  HOST=${HOST}:${PORT}"
+  log "Model=${MODEL}  GPU_VENDOR=${GPU_VENDOR}  GPUS=${GPUS}  TP=${TP}  HOST=${HOST}:${PORT}"
   log "HF_HOME=${HF_HOME}  SGLANG_ROOT=${SGLANG_ROOT}"
   if [[ "$WANT_ACC" == true || "$WANT_PERF" == true ]]; then
     log "Short IO=${SHORT_IO}  Long IO=${LONG_IO} (max-running-requests=${LONG_MAX_RUNNING})"

@@ -25,7 +25,13 @@ bash sglang/suites/glm/run_env_suite.sh --suite-dir ... --phases profile,analyze
 bash sglang/suites/glm/run_env_suite.sh --help
 ```
 
-Default: **GPUS=4,5,6,7**, TP=4, model `amd/GLM-5.2-MXFP4`.
+Default: **GPUS=4,5,6,7**, TP=4; model/recipe auto by GPU vendor
+(`amd/GLM-5.2-MXFP4` on AMD, `nvidia/GLM-5.2-NVFP4` on NVIDIA).
+Override with `--gpu-vendor cuda|amd` or `--model ...`.
+
+```bash
+bash sglang/suites/glm/run_env_suite.sh --gpu-vendor cuda --only-nomtp --dry-run
+```
 
 ### Phases (per mode: nomtp → mtp)
 

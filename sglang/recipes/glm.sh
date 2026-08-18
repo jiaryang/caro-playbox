@@ -1,7 +1,12 @@
-# GLM-5.2 MXFP4 server recipes for SGLang.
-# Sourced by suites/glm/run_env_suite.sh after MODEL/TP/HOST/PORT are set.
+# GLM-5.2 server recipes for SGLang (AMD MXFP4 + NVIDIA NVFP4).
+# Sourced by suites/glm/run_env_suite.sh; args expand when functions run
+# (MODEL/TP/HOST/PORT/GPU_VENDOR must already be set).
 
-glm_base_server_args() {
+_RECIPE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=./glm_nv.sh
+source "${_RECIPE_DIR}/glm_nv.sh"
+
+glm_amd_base_server_args() {
   cat <<EOF
 --model ${MODEL}
 --tp ${TP}
@@ -28,4 +33,20 @@ glm_eagle_server_args() {
 --speculative-num-steps 3
 --speculative-eagle-topk 1
 EOF
+}
+
+# Dispatch by GPU_VENDOR (cuda|amd). Empty -> amd for backward compat.
+glm_base_server_args() {
+  case "${GPU_VENDOR:-amd}" in
+    cuda|nv|nvidia)
+      glm_nv_base_server_args
+      ;;
+    amd|rocm)
+      glm_amd_base_server_args
+      ;;
+    *)
+      echo "ERROR: unknown GPU_VENDOR='${GPU_VENDOR}' (want: cuda|amd)" >&2
+      return 1
+      ;;
+  esac
 }
