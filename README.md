@@ -40,7 +40,7 @@ bash sglang/suites/glm/run_env_suite.sh --gpu-vendor cuda --only-nomtp --dry-run
 | **acc** | GSM8K |
 | **perf** | short IO (`1024:1024`, `8192:1024`) then long IO (`70000:300` with `--max-running-requests 8`) |
 | **profile** | 8k DECODE traces |
-| **analyze** | hierarchical Excel + hierarchy `.txt` under `analyze/` |
+| **analyze** | hierarchical Excel + hierarchy `.txt` + `verify.txt` under `analyze/` |
 
 Select with `--phases` (default `acc,perf,profile,analyze`). Order among selected stages is always acc → perf → profile → analyze.
 
@@ -69,7 +69,7 @@ sglang/suites/glm/suite_glm_env_<ts>/
     i8192_o1024_c4_nocg/     # cuda-graph OFF, conc 4
   profile_logs/{mode}/{tag}/c{N}/   # client .log/.jsonl only (no summary/sweep)
   server_logs/               # {phase}.server.log (+ .server.N.log on restart)
-  analyze/                   # decode_profile Excel + hierarchy .txt
+  analyze/                   # decode_profile Excel + hierarchy .txt + verify.txt
 ```
 
 Perf report columns (CSV / Excel):

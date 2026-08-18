@@ -46,7 +46,8 @@ GLM suite stages (select with --phases; run in this order when included):
   [perf]    nomtp then mtp: 1024:1024 + 8192:1024, then 70000:300
   [profile] cuda-graph ON DECODE for 8192:1024 at conc 4,8,16,32,64,
             then conc=4 --disable-cuda-graph (nomtp then mtp)
-  [analyze] decode_profile Excel + hierarchy .txt under analyze/
+  [analyze] decode_profile Excel + hierarchy .txt + verify.txt
+            (trace status summary) under analyze/
 
 IO matrix:
   1024:1024     perf only
@@ -631,6 +632,16 @@ io_tag_from_pair() {
   echo "i${in}_o${out}"
 }
 
+# i8192_o1024 or i8192_o1024_c4_nocg -> 8192:1024 (for wall-time scaling).
+io_from_profile_tag() {
+  local tag="$1"
+  if [[ "$tag" =~ ^i([0-9]+)_o([0-9]+) ]]; then
+    echo "${BASH_REMATCH[1]}:${BASH_REMATCH[2]}"
+  else
+    echo "$TRACE_IO"
+  fi
+}
+
 # Scale wall-time ceiling with context length (70k attention is much heavier).
 profile_max_wall_for_io() {
   local io="$1"
@@ -1102,10 +1113,11 @@ analyze_all_profiles() {
   local analyzer_root="$PROFILE_ANALYZER_ROOT"
   local out_dir="${SUITE_ROOT}/analyze"
   local rules="${analyzer_root}/rules/glm52.csv"
+  local verify_txt="${out_dir}/verify.txt"
   mkdir -p "$out_dir"
 
   if [[ "$DRY_RUN" == true ]]; then
-    log "DRY-RUN: would single-side analyze each profiles/{nomtp,mtp}/<io> -> ${out_dir}/*.xlsx + *.txt"
+    log "DRY-RUN: would single-side analyze each profiles/{nomtp,mtp}/<io> -> ${out_dir}/*.xlsx + *.txt + verify.txt"
     return 0
   fi
   if [[ ! -d "$analyzer_root/decode_profile" ]]; then
@@ -1116,9 +1128,20 @@ analyze_all_profiles() {
   log "===== PROFILE ANALYZE (single-side hierarchical) ====="
   log "Layers: decode wall/kernel -> phases -> kernel categories -> top kernels"
   log "MTP phases expected: draft / target_verify / draft_extend"
+  log "Verify report (decode_profile --validate) -> ${verify_txt}"
 
   local py_path="${analyzer_root}${PYTHONPATH:+:${PYTHONPATH}}"
-  local mode_dir mode tag_dir tag ntraces out_xlsx out_txt
+  local mode_dir mode tag_dir tag ntraces out_xlsx out_txt io
+  local ok_n=0 fail_n=0 skip_n=0 vrc
+
+  {
+    echo "suite_root=${SUITE_ROOT}"
+    echo "generated=$(date '+%F %T')"
+    echo "check=decode_profile.single --validate (same as profile-phase sanity)"
+    echo "expected_steps=${PROFILE_NUM_STEPS} min_steps=${PROFILE_MIN_STEPS}"
+    echo "profile_max_wall_ms_base=${PROFILE_MAX_WALL_MS} (scaled by IO)"
+    echo
+  } >"$verify_txt"
 
   shopt -s nullglob
   for mode_dir in "${SUITE_ROOT}/profiles/"*; do
@@ -1127,11 +1150,38 @@ analyze_all_profiles() {
     for tag_dir in "${mode_dir}/"*; do
       [[ -d "$tag_dir" ]] || continue
       tag="$(basename "$tag_dir")"
+      io="$(io_from_profile_tag "$tag")"
       ntraces="$(count_decode_traces "$tag_dir")"
+
+      {
+        echo "===== ${mode}/${tag} ====="
+        echo "dir=${tag_dir}"
+        echo "decode_traces=${ntraces}"
+      } >>"$verify_txt"
+
       if (( ntraces <= 0 )); then
+        echo "status=SKIP (no DECODE traces)" >>"$verify_txt"
+        echo >>"$verify_txt"
         log "Skip ${mode}/${tag}: no DECODE traces"
+        skip_n=$((skip_n + 1))
         continue
       fi
+
+      set +e
+      validate_profile_dir "$tag_dir" "$io" "$mode" >>"$verify_txt" 2>&1
+      vrc=$?
+      set -e
+      if (( vrc == 0 )); then
+        echo "status=OK" >>"$verify_txt"
+        ok_n=$((ok_n + 1))
+      else
+        echo "status=FAIL (rc=${vrc})" >>"$verify_txt"
+        fail_n=$((fail_n + 1))
+        ANALYZE_FAILS=$((ANALYZE_FAILS + 1))
+        log "WARN: verify failed for ${mode}/${tag}"
+      fi
+      echo >>"$verify_txt"
+
       out_xlsx="${out_dir}/${mode}_${tag}.xlsx"
       out_txt="${out_dir}/${mode}_${tag}.txt"
       log "Analyze ${mode}/${tag} (decode_traces=${ntraces}) -> ${out_xlsx} + ${out_txt}"
@@ -1155,6 +1205,12 @@ analyze_all_profiles() {
   done
   shopt -u nullglob
 
+  {
+    echo "===== SUMMARY ====="
+    echo "ok=${ok_n} fail=${fail_n} skip=${skip_n}"
+  } >>"$verify_txt"
+
+  log "Wrote verify report: ${verify_txt} (ok=${ok_n} fail=${fail_n} skip=${skip_n})"
   log "Analyze outputs under: ${out_dir}"
 }
 
