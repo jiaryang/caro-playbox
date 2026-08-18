@@ -342,6 +342,7 @@ def validate_path(
     min_steps: int,
     max_wall_ms: float,
     mode: str,
+    conc: int | None = None,
 ) -> int:
     classifier = KernelClassifier(rules)
     try:
@@ -352,6 +353,11 @@ def validate_path(
     except ValueError as exc:
         print(f"TRACE VALIDATION FAILED: {exc}")
         return 1
+    if conc is not None:
+        runs = [r for r in runs if r.conc == conc]
+        if not runs:
+            print(f"TRACE VALIDATION FAILED: no DECODE traces for conc={conc} in {path}")
+            return 1
     issues = validate_runs(
         runs,
         expected_steps=expected_steps,
@@ -410,6 +416,12 @@ def main(argv=None):
         default="",
         help="nomtp|mtp — enables expected phase checks",
     )
+    ap.add_argument(
+        "--conc",
+        type=int,
+        default=None,
+        help="with --validate: only check this concurrency (ignore other _cN traces)",
+    )
     args = ap.parse_args(argv)
 
     if args.validate:
@@ -424,6 +436,7 @@ def main(argv=None):
             min_steps=min_steps,
             max_wall_ms=args.max_wall_ms,
             mode=args.mode or args.label,
+            conc=args.conc,
         )
 
     if not args.output:

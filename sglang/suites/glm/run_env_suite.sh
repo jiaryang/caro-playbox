@@ -6,15 +6,16 @@
 #
 # Workload matrix (per mode nomtp|mtp):
 #   1024:1024           perf only  (baseline server)
-#   8192:1024           perf + DECODE trace + analyze  (baseline)
+#   8192:1024           perf + DECODE trace + analyze  (baseline, conc 4-64)
 #   70000:300           perf only  (server --max-running-requests)
 #
-# Order: all perf (nomtp then mtp) -> profile 8k (cg-on, then c4 nocg) -> analyze.
+# Order among selected stages: acc → perf → profile → analyze
+# (default --phases acc,perf,profile,analyze).
 #
 # Usage:
 #   bash run_env_suite.sh
-#   bash run_env_suite.sh --skip-acc --only-nomtp
-#   bash run_env_suite.sh --dry-run
+#   bash run_env_suite.sh --phases profile,analyze --suite-dir ...
+#   bash run_env_suite.sh --only-nomtp --dry-run
 #
 set -euo pipefail
 
@@ -38,11 +39,11 @@ usage() {
   cat <<'EOF'
 Usage: run_env_suite.sh [options]
 
-GLM suite stages:
+GLM suite stages (select with --phases; run in this order when included):
   [acc]     GSM8K accuracy (per mode)
   [perf]    nomtp then mtp: 1024:1024 + 8192:1024, then 70000:300
-  [profile] after all perf: baseline DECODE for 8192:1024, then
-            conc=4 --disable-cuda-graph (op compare) for nomtp+mtp
+  [profile] cuda-graph ON DECODE for 8192:1024 at conc 4,8,16,32,64,
+            then conc=4 --disable-cuda-graph (nomtp then mtp)
   [analyze] decode_profile.single hierarchical Excel (8k traces)
 
 IO matrix:
@@ -65,30 +66,37 @@ Options:
   --long-io PAIR               long-ctx perf IO    (default: 70000:300)
   --trace-io PAIR              DECODE profile IO   (default: 8192:1024)
   --long-max-running N         --max-running-requests for long-ctx  (default: 8)
-  --skip-acc                   skip GSM8K accuracy phases
-  --skip-perf                  skip all perf sweeps
-  --skip-short-ctx             skip short-ctx perf (1024/8192)
-  --skip-long-ctx              skip 70000:300 perf
-  --skip-profile               skip torch profiling (after all perf)
-  --skip-analyze               skip analysis after profiles
+  --phases LIST                stages to run, comma-separated
+                               (default: acc,perf,profile,analyze)
+                               e.g. --phases profile,analyze
+  --skip-short-ctx             skip short-ctx perf (1024/8192) within perf
+  --skip-long-ctx              skip 70000:300 perf within perf
   --profile-num-steps N        profile decode steps  (default: 20)
-  --profile-concurrencies N    conc list for profile only  (default: 8)
+  --profile-concurrencies N    conc list for profile only
+                               (default: 4,8,16,32,64)
   --profile-nocg-concurrencies N
                                conc for disable-cuda-graph profile
                                (default: 4)
+  --nocg-profile               record conc4 --disable-cuda-graph (default)
   --skip-nocg-profile          skip conc4 --disable-cuda-graph profiles
-  --profile-retries N          retries after fail / bad trace  (default: 1)
+  --profile-retries N          retries after fail / bad trace  (default: 2)
   --profile-min-steps N        min acceptable DECODE steps
                                (default: max(5, 75% of num-steps))
   --profile-max-wall-ms MS     max decode/phase wall ms/step for 8k
                                (default: 300; scaled by input length)
+  --profile-watchdog-sec N     while recording, poll server health
+                               (default: 10; 0=disable poll only)
+  --profile-sweep-timeout-sec N
+                               per-conc wall timeout; then kill client,
+                               restart server, retry  (default: auto
+                               max(600, conc*30), nocg 2x; 0=no wall
+                               timeout)
   --profile-analyzer-root PATH (default: <repo>/analysis)
   --suite-dir PATH             reuse an existing suite dir (no new timestamp)
-  --from-phase PHASE           perf|profile|analyze  (default: perf)
   --only-nomtp                 only nomtp (no EAGLE)
   --only-mtp                   only mtp / EAGLE
   --keep-server                do not stop server at the very end
-  --dry-run                    print commands only
+  --dry-run                    print plan only (no suite dir / outputs)
   --extra-server-args "..."    extra args appended to every launch_server
   --extra-sweep-args "..."     extra args appended to every sweep_bench.sh
   -h, --help                   show this help
@@ -112,22 +120,24 @@ SHORT_IO="1024:1024,8192:1024"
 LONG_IO="70000:300"
 TRACE_IO="8192:1024"
 LONG_MAX_RUNNING="8"
-SKIP_ACC=false
-SKIP_PERF=false
+PHASES="acc,perf,profile,analyze"
+WANT_ACC=false
+WANT_PERF=false
+WANT_PROFILE=false
+WANT_ANALYZE=false
 SKIP_SHORT=false
 SKIP_LONG=false
-SKIP_PROFILE=false
-SKIP_ANALYZE=false
 SKIP_NOCG_PROFILE=false
 PROFILE_NUM_STEPS="20"
-PROFILE_CONCURRENCIES="8"
+PROFILE_CONCURRENCIES="4,8,16,32,64"
 PROFILE_NOCG_CONCURRENCIES="4"
-PROFILE_RETRIES="1"
+PROFILE_RETRIES="2"
 PROFILE_MIN_STEPS=""          # empty -> auto from PROFILE_NUM_STEPS
 PROFILE_MAX_WALL_MS="300"     # short-ctx default; long IO scaled in helper
+PROFILE_WATCHDOG_SEC="10"     # 0 = disable in-sweep health poll
+PROFILE_SWEEP_TIMEOUT_SEC=""  # empty = auto; 0 = no wall timeout
 PROFILE_ANALYZER_ROOT="$PROFILE_ANALYZER_ROOT_DEFAULT"
 SUITE_DIR_OVERRIDE=""
-FROM_PHASE="perf"   # perf | profile | analyze
 ONLY_NOMTP=false
 ONLY_MTP=false
 KEEP_SERVER=false
@@ -143,6 +153,7 @@ CURRENT_PHASE=""
 CURRENT_MODE=""   # nomtp | mtp
 PROFILE_FAILS=0
 ANALYZE_FAILS=0
+SWEEP_PID=""
 declare -a CURRENT_SERVER_EXTRA=()
 
 while [[ $# -gt 0 ]]; do
@@ -160,22 +171,25 @@ while [[ $# -gt 0 ]]; do
     --long-io)            LONG_IO="$2"; shift 2 ;;
     --trace-io)           TRACE_IO="$2"; shift 2 ;;
     --long-max-running)   LONG_MAX_RUNNING="$2"; shift 2 ;;
-    --skip-acc)           SKIP_ACC=true; shift ;;
-    --skip-perf)          SKIP_PERF=true; shift ;;
+    --phases)             PHASES="$2"; shift 2 ;;
     --skip-short-ctx)     SKIP_SHORT=true; shift ;;
     --skip-long-ctx)      SKIP_LONG=true; shift ;;
-    --skip-profile)       SKIP_PROFILE=true; shift ;;
-    --skip-analyze)       SKIP_ANALYZE=true; shift ;;
     --skip-nocg-profile)  SKIP_NOCG_PROFILE=true; shift ;;
+    --nocg-profile)       SKIP_NOCG_PROFILE=false; shift ;;
     --profile-num-steps)  PROFILE_NUM_STEPS="$2"; shift 2 ;;
     --profile-concurrencies) PROFILE_CONCURRENCIES="$2"; shift 2 ;;
     --profile-nocg-concurrencies) PROFILE_NOCG_CONCURRENCIES="$2"; shift 2 ;;
     --profile-retries)    PROFILE_RETRIES="$2"; shift 2 ;;
     --profile-min-steps)  PROFILE_MIN_STEPS="$2"; shift 2 ;;
     --profile-max-wall-ms) PROFILE_MAX_WALL_MS="$2"; shift 2 ;;
+    --profile-watchdog-sec) PROFILE_WATCHDOG_SEC="$2"; shift 2 ;;
+    --profile-sweep-timeout-sec) PROFILE_SWEEP_TIMEOUT_SEC="$2"; shift 2 ;;
     --profile-analyzer-root) PROFILE_ANALYZER_ROOT="$2"; shift 2 ;;
     --suite-dir)          SUITE_DIR_OVERRIDE="$2"; shift 2 ;;
-    --from-phase)         FROM_PHASE="$2"; shift 2 ;;
+    --from-phase|--skip-acc|--skip-perf|--skip-profile|--skip-analyze)
+      echo "ERROR: $1 removed; use --phases acc,perf,profile,analyze" >&2
+      exit 1
+      ;;
     --only-nomtp)         ONLY_NOMTP=true; shift ;;
     --only-mtp)           ONLY_MTP=true; shift ;;
     --keep-server)        KEEP_SERVER=true; shift ;;
@@ -191,17 +205,42 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+parse_phases() {
+  local raw="$1"
+  local -a parts=()
+  local p
+  WANT_ACC=false
+  WANT_PERF=false
+  WANT_PROFILE=false
+  WANT_ANALYZE=false
+  IFS=',' read -ra parts <<< "$raw"
+  for p in "${parts[@]}"; do
+    p="${p// /}"
+    p="${p,,}"
+    case "$p" in
+      "") ;;
+      acc) WANT_ACC=true ;;
+      perf) WANT_PERF=true ;;
+      profile) WANT_PROFILE=true ;;
+      analyze) WANT_ANALYZE=true ;;
+      *)
+        echo "ERROR: unknown phase '${p}' in --phases (want: acc,perf,profile,analyze)" >&2
+        exit 1
+        ;;
+    esac
+  done
+  if [[ "$WANT_ACC" != true && "$WANT_PERF" != true && "$WANT_PROFILE" != true && "$WANT_ANALYZE" != true ]]; then
+    echo "ERROR: --phases must include at least one of: acc,perf,profile,analyze" >&2
+    exit 1
+  fi
+}
+
+parse_phases "$PHASES"
+
 if [[ "$ONLY_NOMTP" == true && "$ONLY_MTP" == true ]]; then
   echo "ERROR: --only-nomtp and --only-mtp are mutually exclusive" >&2
   exit 1
 fi
-case "$FROM_PHASE" in
-  perf|profile|analyze) ;;
-  *)
-    echo "ERROR: --from-phase must be perf|profile|analyze (got: ${FROM_PHASE})" >&2
-    exit 1
-    ;;
-esac
 if [[ -n "$SUITE_DIR_OVERRIDE" && ! -d "$SUITE_DIR_OVERRIDE" ]]; then
   echo "ERROR: --suite-dir does not exist: ${SUITE_DIR_OVERRIDE}" >&2
   exit 1
@@ -224,6 +263,14 @@ if [[ -n "$PROFILE_MIN_STEPS" ]] && ! [[ "$PROFILE_MIN_STEPS" =~ ^[1-9][0-9]*$ ]
 fi
 if ! [[ "$PROFILE_MAX_WALL_MS" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
   echo "ERROR: --profile-max-wall-ms must be a positive number" >&2
+  exit 1
+fi
+if ! [[ "$PROFILE_WATCHDOG_SEC" =~ ^[0-9]+$ ]]; then
+  echo "ERROR: --profile-watchdog-sec must be a non-negative integer" >&2
+  exit 1
+fi
+if [[ -n "$PROFILE_SWEEP_TIMEOUT_SEC" ]] && ! [[ "$PROFILE_SWEEP_TIMEOUT_SEC" =~ ^[0-9]+$ ]]; then
+  echo "ERROR: --profile-sweep-timeout-sec must be a non-negative integer" >&2
   exit 1
 fi
 # Default min steps: 75% of requested profile steps (at least 5).
@@ -442,19 +489,34 @@ server_smoke_ok() {
     >/dev/null 2>&1
 }
 
+# Optional conc: only files whose basename matches _c<N>[-_.] (not c4 vs c40).
+_decode_trace_list() {
+  local dir="$1"
+  local conc="${2:-}"
+  [[ -d "$dir" ]] || return 0
+  if [[ -n "$conc" ]]; then
+    find "$dir" -type f -name '*DECODE.trace.json.gz' 2>/dev/null \
+      | grep -E "_c${conc}[-_.]" || true
+  else
+    find "$dir" -type f -name '*DECODE.trace.json.gz' 2>/dev/null || true
+  fi
+}
+
 count_decode_traces() {
   local dir="$1"
-  if [[ ! -d "$dir" ]]; then
-    echo 0
-    return
-  fi
-  find "$dir" -type f -name '*DECODE.trace.json.gz' 2>/dev/null | wc -l
+  local conc="${2:-}"
+  _decode_trace_list "$dir" "$conc" | grep -c . || true
 }
 
 clear_decode_traces() {
   local dir="$1"
+  local conc="${2:-}"
+  local f
   [[ -d "$dir" ]] || return 0
-  find "$dir" -type f -name '*DECODE.trace.json.gz' -delete 2>/dev/null || true
+  while IFS= read -r f; do
+    [[ -n "$f" ]] || continue
+    rm -f "$f"
+  done < <(_decode_trace_list "$dir" "$conc")
 }
 
 io_tag_from_pair() {
@@ -482,24 +544,30 @@ profile_max_wall_for_io() {
 }
 
 # Validate DECODE traces: step count + wall/phase times via decode_profile.single.
+# Optional conc: only check that concurrency (avoids stale traces under --suite-dir).
 validate_profile_dir() {
   local pdir="$1"
   local io="$2"
   local mode="$3"
+  local conc="${4:-}"
   local max_wall
   max_wall="$(profile_max_wall_for_io "$io")"
   local analyzer_root="$PROFILE_ANALYZER_ROOT"
   local rules="${analyzer_root}/rules/glm52.csv"
   local py_path="${analyzer_root}${PYTHONPATH:+:${PYTHONPATH}}"
   local vrc
+  local -a conc_args=()
 
   if [[ "$DRY_RUN" == true ]]; then
-    log "DRY-RUN validate: dir=${pdir} mode=${mode} min_steps=${PROFILE_MIN_STEPS} max_wall_ms=${max_wall}"
+    log "DRY-RUN validate: dir=${pdir} mode=${mode} conc=${conc:-all} min_steps=${PROFILE_MIN_STEPS} max_wall_ms=${max_wall}"
     return 0
   fi
   if [[ ! -d "$analyzer_root/decode_profile" ]]; then
     log "WARN: analysis tree missing; skip trace validation"
     return 0
+  fi
+  if [[ -n "$conc" ]]; then
+    conc_args=(--conc "$conc")
   fi
 
   set +e
@@ -513,7 +581,8 @@ validate_profile_dir() {
       --expected-steps "$PROFILE_NUM_STEPS" \
       --min-steps "$PROFILE_MIN_STEPS" \
       --max-wall-ms "$max_wall" \
-      --mode "$mode"
+      --mode "$mode" \
+      "${conc_args[@]}"
   )
   vrc=$?
   set -e
@@ -558,9 +627,117 @@ run_sweep() {
   )
 }
 
+# Kill pid and descendants; skip the tracked SGLang server pid.
+_kill_pid_tree() {
+  local pid="$1"
+  local sig="${2:--TERM}"
+  local child
+  [[ -n "$pid" ]] || return 0
+  while IFS= read -r child; do
+    [[ -z "$child" ]] && continue
+    [[ -n "${SERVER_PID:-}" && "$child" == "$SERVER_PID" ]] && continue
+    _kill_pid_tree "$child" "$sig"
+  done < <(pgrep -P "$pid" 2>/dev/null || true)
+  kill "$sig" "$pid" 2>/dev/null || true
+}
+
+stop_sweep_pid() {
+  local pid="$1"
+  [[ -n "$pid" ]] || return 0
+  if ! kill -0 "$pid" 2>/dev/null; then
+    return 0
+  fi
+  log "Stopping profile sweep pid=${pid} and children"
+  _kill_pid_tree "$pid" -TERM
+  local i
+  for i in $(seq 1 8); do
+    kill -0 "$pid" 2>/dev/null || return 0
+    sleep 1
+  done
+  log "Sweep pid=${pid} still alive; SIGKILL tree"
+  _kill_pid_tree "$pid" -KILL
+}
+
+# Auto wall timeout: max(600, conc*30) for cg-on; nocg uses 2x (slower).
+# Explicit --profile-sweep-timeout-sec overrides both. 0 = off.
+profile_sweep_timeout_for_conc() {
+  local conc="$1"
+  local which="${2:-trace}"
+  if [[ -n "$PROFILE_SWEEP_TIMEOUT_SEC" ]]; then
+    echo "$PROFILE_SWEEP_TIMEOUT_SEC"
+    return 0
+  fi
+  local t=$((conc * 30))
+  if (( t < 600 )); then
+    t=600
+  fi
+  if [[ "$which" == "nocg" ]]; then
+    t=$((t * 2))
+  fi
+  echo "$t"
+}
+
+# Run sweep in background; abort if server dies or wall timeout hits.
+# rc 124 = wall timeout, 125 = server unhealthy mid-sweep.
+# PROFILE_WATCHDOG_SEC=0 disables health polls only; wall timeout still applies.
+run_sweep_watched() {
+  local timeout_sec="$1"
+  shift
+
+  if [[ "$DRY_RUN" == true ]]; then
+    run_sweep "$@"
+    return
+  fi
+
+  # No poll and no wall timeout -> plain foreground sweep.
+  if [[ "$PROFILE_WATCHDOG_SEC" == "0" && ( "$timeout_sec" == "0" || -z "$timeout_sec" ) ]]; then
+    run_sweep "$@"
+    return
+  fi
+
+  log "Watchdog on: poll=${PROFILE_WATCHDOG_SEC}s wall_timeout=${timeout_sec}s"
+  run_sweep "$@" &
+  local spid=$!
+  SWEEP_PID="$spid"
+  local start now elapsed next_check
+  start="$(date +%s)"
+  if [[ "$PROFILE_WATCHDOG_SEC" != "0" ]]; then
+    next_check=$((start + PROFILE_WATCHDOG_SEC))
+  else
+    next_check=0
+  fi
+
+  while kill -0 "$spid" 2>/dev/null; do
+    sleep 1
+    now="$(date +%s)"
+    elapsed=$((now - start))
+    if (( timeout_sec > 0 && elapsed >= timeout_sec )); then
+      log "WATCHDOG: sweep pid=${spid} exceeded ${timeout_sec}s wall timeout"
+      stop_sweep_pid "$spid"
+      wait "$spid" 2>/dev/null || true
+      SWEEP_PID=""
+      return 124
+    fi
+    if (( next_check > 0 && now >= next_check )); then
+      next_check=$((now + PROFILE_WATCHDOG_SEC))
+      if ! server_is_healthy; then
+        log "WATCHDOG: server unhealthy during sweep pid=${spid} after ${elapsed}s"
+        stop_sweep_pid "$spid"
+        wait "$spid" 2>/dev/null || true
+        SWEEP_PID=""
+        return 125
+      fi
+    fi
+  done
+  local rc=0
+  wait "$spid" || rc=$?
+  SWEEP_PID=""
+  return "$rc"
+}
+
 run_acc_if_needed() {
-  if [[ "$SKIP_ACC" == true ]]; then
-    log "Skip acc"
+  if [[ "$WANT_ACC" != true ]]; then
+    log "Skip acc (not in --phases)"
     return 0
   fi
   mkdir -p "${SUITE_ROOT}/acc/${CURRENT_MODE}"
@@ -568,50 +745,60 @@ run_acc_if_needed() {
 }
 
 run_short_perf_if_needed() {
-  if [[ "$SKIP_PERF" == true || "$SKIP_SHORT" == true ]]; then
+  if [[ "$WANT_PERF" != true || "$SKIP_SHORT" == true ]]; then
     log "Skip short-ctx perf (${SHORT_IO})"
     return 0
   fi
-  mkdir -p "${SUITE_ROOT}/perf/${CURRENT_MODE}/short"
+  mkdir -p "${SUITE_ROOT}/perf/${CURRENT_MODE}"
   run_sweep perf \
     --perf-io-pairs "$SHORT_IO" \
-    --perf-result-dir "${SUITE_ROOT}/perf/${CURRENT_MODE}/short"
+    --perf-result-dir "${SUITE_ROOT}/perf/${CURRENT_MODE}"
 }
 
 run_long_perf_if_needed() {
-  if [[ "$SKIP_PERF" == true || "$SKIP_LONG" == true ]]; then
+  if [[ "$WANT_PERF" != true || "$SKIP_LONG" == true ]]; then
     log "Skip long-ctx perf (${LONG_IO})"
     return 0
   fi
-  mkdir -p "${SUITE_ROOT}/perf/${CURRENT_MODE}/long"
+  # Same dir as short: summarize_perf globs all glm_{mode}_*.jsonl into one summary.
+  mkdir -p "${SUITE_ROOT}/perf/${CURRENT_MODE}"
   run_sweep perf \
     --perf-io-pairs "$LONG_IO" \
-    --perf-result-dir "${SUITE_ROOT}/perf/${CURRENT_MODE}/long"
+    --perf-result-dir "${SUITE_ROOT}/perf/${CURRENT_MODE}"
 }
 
-# One IO pair profile via sweep_bench --profile; restart server on failure
-# or when DECODE trace step/wall sanity checks fail.
+# One IO pair + one concurrency via sweep_bench --profile; restart server on
+# failure or when DECODE trace step/wall sanity checks fail.
 # Optional: conc override and tag_suffix (e.g. _c4_nocg for op-compare traces).
+# which=nocg applies 2x auto wall timeout. Only this conc's traces are cleared.
 run_one_profile() {
   local io="$1"
   local conc="${2:-$PROFILE_CONCURRENCIES}"
   local tag_suffix="${3:-}"
+  local which="${4:-trace}"
   local tag
   tag="$(io_tag_from_pair "$io")${tag_suffix}"
   local pdir="${SUITE_ROOT}/profiles/${CURRENT_MODE}/${tag}"
-  local stub="${SUITE_ROOT}/profile_sweep_logs/${CURRENT_MODE}/${tag}"
+  local stub="${SUITE_ROOT}/profile_sweep_logs/${CURRENT_MODE}/${tag}/c${conc}"
   local attempts=$((PROFILE_RETRIES + 1))
-  local attempt rc ntraces max_wall
+  local attempt rc ntraces max_wall sweep_timeout profile_olen
 
   max_wall="$(profile_max_wall_for_io "$io")"
-  mkdir -p "$pdir" "$stub"
+  sweep_timeout="$(profile_sweep_timeout_for_conc "$conc" "$which")"
+  if [[ "$CURRENT_MODE" == "mtp" ]]; then
+    profile_olen=128
+  else
+    profile_olen=64
+  fi
   log "===== PROFILE mode=${CURRENT_MODE} io=${io} conc=${conc} dir=${pdir} ====="
-  log "Trace checks: expected_steps=${PROFILE_NUM_STEPS} min_steps=${PROFILE_MIN_STEPS} max_wall_ms=${max_wall}"
+  log "Trace checks: expected_steps=${PROFILE_NUM_STEPS} min_steps=${PROFILE_MIN_STEPS} max_wall_ms=${max_wall} sweep_timeout=${sweep_timeout}s watchdog=${PROFILE_WATCHDOG_SEC}s profile_output_len=${profile_olen} (dir tag keeps TRACE_IO)"
 
   if [[ "$DRY_RUN" == true ]]; then
-    log "DRY-RUN profile: --perf-io-pairs ${io} --perf-concurrencies ${conc} --profile --profile-output-dir ${pdir}"
+    log "DRY-RUN profile: --perf-io-pairs ${io} --perf-concurrencies ${conc} --profile --profile-output-dir ${pdir} (actual output_len=${profile_olen})"
     return 0
   fi
+
+  mkdir -p "$pdir" "$stub"
 
   for attempt in $(seq 1 "$attempts"); do
     if ! server_is_healthy; then
@@ -619,11 +806,11 @@ run_one_profile() {
       restart_current_server
     fi
 
-    # Drop prior bad/partial traces so retries do not pick them up.
-    clear_decode_traces "$pdir"
+    # Drop prior bad/partial traces for this conc so retries do not pick them up.
+    clear_decode_traces "$pdir" "$conc"
 
     set +e
-    run_sweep perf \
+    run_sweep_watched "$sweep_timeout" perf \
       --perf-io-pairs "$io" \
       --perf-concurrencies "$conc" \
       --profile \
@@ -633,8 +820,21 @@ run_one_profile() {
     rc=$?
     set -e
 
-    ntraces="$(count_decode_traces "$pdir")"
-    log "Profile attempt ${attempt}/${attempts}: sweep_rc=${rc} decode_traces=${ntraces}"
+    ntraces="$(count_decode_traces "$pdir" "$conc")"
+    log "Profile attempt ${attempt}/${attempts}: sweep_rc=${rc} decode_traces=${ntraces} conc=${conc}"
+
+    if (( rc == 124 || rc == 125 )); then
+      if (( rc == 124 )); then
+        log "WARN: profile wall timeout for ${CURRENT_MODE}/${tag} conc=${conc} (attempt ${attempt}/${attempts})"
+      else
+        log "WARN: server died during profile for ${CURRENT_MODE}/${tag} conc=${conc} (attempt ${attempt}/${attempts})"
+      fi
+      clear_decode_traces "$pdir" "$conc"
+      if (( attempt < attempts )); then
+        restart_current_server
+      fi
+      continue
+    fi
 
     if (( ntraces <= 0 )); then
       log "WARN: no DECODE traces for ${CURRENT_MODE}/${tag} (attempt ${attempt}/${attempts})"
@@ -644,11 +844,11 @@ run_one_profile() {
       continue
     fi
 
-    if ! validate_profile_dir "$pdir" "$io" "$CURRENT_MODE"; then
-      log "WARN: trace sanity check failed for ${CURRENT_MODE}/${tag} (attempt ${attempt}/${attempts})"
+    if ! validate_profile_dir "$pdir" "$io" "$CURRENT_MODE" "$conc"; then
+      log "WARN: trace sanity check failed for ${CURRENT_MODE}/${tag} conc=${conc} (attempt ${attempt}/${attempts})"
       # Keep the last rejected traces for post-mortem; only clear before a retry.
       if (( attempt < attempts )); then
-        clear_decode_traces "$pdir"
+        clear_decode_traces "$pdir" "$conc"
         restart_current_server
       fi
       continue
@@ -671,7 +871,7 @@ run_profile_ios_if_needed() {
   local which="$2"   # short|long|trace|nocg
   local conc="${3:-$PROFILE_CONCURRENCIES}"
   local tag_suffix="${4:-}"
-  if [[ "$SKIP_PROFILE" == true ]]; then
+  if [[ "$WANT_PROFILE" != true ]]; then
     log "Skip profile (${which})"
     return 0
   fi
@@ -688,32 +888,42 @@ run_profile_ios_if_needed() {
     return 0
   fi
 
-  local -a pairs=()
-  local io prc
+  local -a pairs=() concs=()
+  local io c prc
   IFS=',' read -ra pairs <<< "$ios"
+  IFS=',' read -ra concs <<< "$conc"
   for io in "${pairs[@]}"; do
     io="${io// /}"
     [[ -z "$io" ]] && continue
-    # Do not abort the whole suite if one shape's profile fails.
-    set +e
-    run_one_profile "$io" "$conc" "$tag_suffix"
-    prc=$?
-    set -e
-    if (( prc != 0 )); then
-      PROFILE_FAILS=$((PROFILE_FAILS + 1))
-    fi
+    for c in "${concs[@]}"; do
+      c="${c// /}"
+      [[ -z "$c" ]] && continue
+      # Do not abort the whole suite if one shape/conc profile fails.
+      set +e
+      if [[ "$which" == "nocg" ]]; then
+        # Per-conc suffix so --profile-nocg-concurrencies 4,8 -> _c4_nocg, _c8_nocg
+        run_one_profile "$io" "$c" "_c${c}_nocg" nocg
+      else
+        run_one_profile "$io" "$c" "$tag_suffix" "$which"
+      fi
+      prc=$?
+      set -e
+      if (( prc != 0 )); then
+        PROFILE_FAILS=$((PROFILE_FAILS + 1))
+      fi
+    done
   done
 }
 
-# After all perf: baseline (cuda-graph ON) then conc4 --disable-cuda-graph
-# for op comparison. DECODE for TRACE_IO (default 8k) only.
+# DECODE for TRACE_IO (default 8k) at PROFILE_CONCURRENCIES (default 4,8,16,32,64),
+# then conc4 --disable-cuda-graph (skip with --skip-nocg-profile).
 run_all_profiles_after_perf() {
-  if [[ "$SKIP_PROFILE" == true ]]; then
-    log "Skip all profiles"
+  if [[ "$WANT_PROFILE" != true ]]; then
+    log "Skip all profiles (not in --phases)"
     return 0
   fi
 
-  log "===== PROFILE PHASE (after all perf; TRACE_IO=${TRACE_IO}) ====="
+  log "===== PROFILE PHASE (TRACE_IO=${TRACE_IO}) ====="
 
   local -a eagle_args=()
   local line
@@ -736,8 +946,7 @@ run_all_profiles_after_perf() {
     else
       log "===== PROFILE nomtp / TRACE_IO=${TRACE_IO} (disable-cuda-graph, conc=${PROFILE_NOCG_CONCURRENCIES}) ====="
       start_server "nomtp_profile_nocg" --disable-cuda-graph
-      run_profile_ios_if_needed "$TRACE_IO" nocg \
-        "$PROFILE_NOCG_CONCURRENCIES" "_c${PROFILE_NOCG_CONCURRENCIES}_nocg"
+      run_profile_ios_if_needed "$TRACE_IO" nocg "$PROFILE_NOCG_CONCURRENCIES"
     fi
   fi
 
@@ -752,15 +961,14 @@ run_all_profiles_after_perf() {
     else
       log "===== PROFILE mtp / TRACE_IO=${TRACE_IO} (disable-cuda-graph, conc=${PROFILE_NOCG_CONCURRENCIES}) ====="
       start_server "mtp_profile_nocg" "${eagle_args[@]}" --disable-cuda-graph
-      run_profile_ios_if_needed "$TRACE_IO" nocg \
-        "$PROFILE_NOCG_CONCURRENCIES" "_c${PROFILE_NOCG_CONCURRENCIES}_nocg"
+      run_profile_ios_if_needed "$TRACE_IO" nocg "$PROFILE_NOCG_CONCURRENCIES"
     fi
   fi
 }
 
 analyze_all_profiles() {
-  if [[ "$SKIP_ANALYZE" == true || "$SKIP_PROFILE" == true ]]; then
-    log "Skip analysis"
+  if [[ "$WANT_ANALYZE" != true ]]; then
+    log "Skip analysis (not in --phases)"
     return 0
   fi
 
@@ -826,7 +1034,8 @@ write_manifest() {
   {
     echo "suite_root=${SUITE_ROOT}"
     echo "started_or_resumed=$(date '+%F %T')"
-    echo "from_phase=${FROM_PHASE}"
+    echo "phases=${PHASES}"
+    echo "want_acc=${WANT_ACC} want_perf=${WANT_PERF} want_profile=${WANT_PROFILE} want_analyze=${WANT_ANALYZE}"
     echo "model=${MODEL}"
     echo "model_key=${MODEL_KEY}"
     echo "gpus=${GPUS}"
@@ -837,12 +1046,13 @@ write_manifest() {
     echo "profile_num_steps=${PROFILE_NUM_STEPS}"
     echo "profile_min_steps=${PROFILE_MIN_STEPS}"
     echo "profile_max_wall_ms=${PROFILE_MAX_WALL_MS}"
+    echo "profile_watchdog_sec=${PROFILE_WATCHDOG_SEC}"
+    echo "profile_sweep_timeout_sec=${PROFILE_SWEEP_TIMEOUT_SEC:-auto}"
     echo "profile_concurrencies=${PROFILE_CONCURRENCIES}"
     echo "profile_nocg_concurrencies=${PROFILE_NOCG_CONCURRENCIES}"
     echo "skip_nocg_profile=${SKIP_NOCG_PROFILE}"
     echo "only_nomtp=${ONLY_NOMTP}"
     echo "only_mtp=${ONLY_MTP}"
-    echo "skip_acc=${SKIP_ACC} skip_perf=${SKIP_PERF} skip_profile=${SKIP_PROFILE} skip_analyze=${SKIP_ANALYZE}"
     echo "profile_fails=${PROFILE_FAILS}"
     echo "analyze_fails=${ANALYZE_FAILS}"
     echo "paths:"
@@ -858,6 +1068,10 @@ write_manifest() {
 
 cleanup() {
   local ec=$?
+  stop_sweep_pid "${SWEEP_PID:-}" || true
+  if [[ "$DRY_RUN" == true ]]; then
+    exit "$ec"
+  fi
   if [[ "$KEEP_SERVER" == true ]]; then
     log "Keeping server running (PID=${SERVER_PID:-unknown})"
     exit "$ec"
@@ -869,48 +1083,58 @@ cleanup() {
 main() {
   if [[ -n "$SUITE_DIR_OVERRIDE" ]]; then
     SUITE_ROOT="$(cd "$SUITE_DIR_OVERRIDE" && pwd)"
+    mkdir -p "$SUITE_ROOT"
+    SUITE_LOG="${SUITE_ROOT}/suite.log"
+    touch "$SUITE_LOG"
+  elif [[ "$DRY_RUN" == true ]]; then
+    # Do not create a timestamped suite dir for dry-run (avoids empty leftovers).
+    SUITE_ROOT="/tmp/glm_suite_dryrun"
+    SUITE_LOG=""
   else
     local ts
     ts="$(date +%Y%m%d_%H%M%S)"
     SUITE_ROOT="${SCRIPT_DIR}/suite_glm_env_${ts}"
     mkdir -p "$SUITE_ROOT"
+    SUITE_LOG="${SUITE_ROOT}/suite.log"
+    touch "$SUITE_LOG"
   fi
-  mkdir -p "$SUITE_ROOT"
-  SUITE_LOG="${SUITE_ROOT}/suite.log"
-  touch "$SUITE_LOG"
 
   setup_env
   trap cleanup EXIT INT TERM
 
   log "=== GLM env suite start ==="
   log "Suite dir: ${SUITE_ROOT}"
-  log "from-phase=${FROM_PHASE}"
+  log "phases=${PHASES}  dry-run=${DRY_RUN}"
   log "Model=${MODEL}  GPUS=${GPUS}  TP=${TP}  HOST=${HOST}:${PORT}"
   log "HF_HOME=${HF_HOME}  SGLANG_ROOT=${SGLANG_ROOT}"
-  log "Short IO=${SHORT_IO}  Long IO=${LONG_IO}  Trace IO=${TRACE_IO} (max-running-requests=${LONG_MAX_RUNNING})"
-  log "Order: all perf first, then profile TRACE_IO only, then analyze"
-  log "Profile: skip=${SKIP_PROFILE} steps=${PROFILE_NUM_STEPS} min_steps=${PROFILE_MIN_STEPS} max_wall_ms=${PROFILE_MAX_WALL_MS} conc=${PROFILE_CONCURRENCIES} nocg_conc=${PROFILE_NOCG_CONCURRENCIES} skip_nocg=${SKIP_NOCG_PROFILE} retries=${PROFILE_RETRIES}"
-  log "Analyze: skip=${SKIP_ANALYZE} analyzer=${PROFILE_ANALYZER_ROOT}"
+  if [[ "$WANT_ACC" == true || "$WANT_PERF" == true ]]; then
+    log "Short IO=${SHORT_IO}  Long IO=${LONG_IO} (max-running-requests=${LONG_MAX_RUNNING})"
+  fi
+  if [[ "$WANT_PROFILE" == true ]]; then
+    log "Trace IO=${TRACE_IO}  profile_conc=${PROFILE_CONCURRENCIES}  nocg_conc=${PROFILE_NOCG_CONCURRENCIES} skip_nocg=${SKIP_NOCG_PROFILE}"
+  fi
+  log "Order: selected phases only (acc → perf → profile → analyze)"
+  log "Profile: want=${WANT_PROFILE} steps=${PROFILE_NUM_STEPS} min_steps=${PROFILE_MIN_STEPS} max_wall_ms=${PROFILE_MAX_WALL_MS} conc=${PROFILE_CONCURRENCIES} nocg_conc=${PROFILE_NOCG_CONCURRENCIES} skip_nocg=${SKIP_NOCG_PROFILE} retries=${PROFILE_RETRIES} watchdog=${PROFILE_WATCHDOG_SEC}s sweep_timeout=${PROFILE_SWEEP_TIMEOUT_SEC:-auto} (nocg auto 2x)"
+  log "Analyze: want=${WANT_ANALYZE} analyzer=${PROFILE_ANALYZER_ROOT}"
 
-  # ----- PERF: non-MTP -----
-  if [[ "$FROM_PHASE" == "perf" ]]; then
+  # ----- ACC + PERF (shared servers) -----
+  if [[ "$WANT_ACC" == true || "$WANT_PERF" == true ]]; then
     if [[ "$ONLY_MTP" != true ]]; then
       CURRENT_MODE="nomtp"
-      log "===== PHASE nomtp / baseline (perf only) ====="
+      log "===== PHASE nomtp / baseline ====="
       start_server "nomtp_baseline"
       run_acc_if_needed
       run_short_perf_if_needed
 
-      if [[ "$SKIP_LONG" == true ]]; then
-        log "Skip nomtp / long-ctx phase (--skip-long-ctx)"
+      if [[ "$WANT_PERF" != true || "$SKIP_LONG" == true ]]; then
+        log "Skip nomtp / long-ctx phase"
       else
-        log "===== PHASE nomtp / long-ctx (perf only, max-running-requests=${LONG_MAX_RUNNING}) ====="
+        log "===== PHASE nomtp / long-ctx (max-running-requests=${LONG_MAX_RUNNING}) ====="
         start_server "nomtp_longctx" --max-running-requests "$LONG_MAX_RUNNING"
         run_long_perf_if_needed
       fi
     fi
 
-    # ----- PERF: MTP / EAGLE -----
     if [[ "$ONLY_NOMTP" != true ]]; then
       CURRENT_MODE="mtp"
       local -a eagle_args=()
@@ -921,47 +1145,62 @@ main() {
         eagle_args+=($line)
       done < <(eagle_server_args)
 
-      log "===== PHASE mtp / EAGLE baseline (perf only) ====="
+      log "===== PHASE mtp / EAGLE baseline ====="
       start_server "mtp_baseline" "${eagle_args[@]}"
       run_acc_if_needed
       run_short_perf_if_needed
 
-      if [[ "$SKIP_LONG" == true ]]; then
-        log "Skip mtp / long-ctx phase (--skip-long-ctx)"
+      if [[ "$WANT_PERF" != true || "$SKIP_LONG" == true ]]; then
+        log "Skip mtp / long-ctx phase"
       else
-        log "===== PHASE mtp / EAGLE long-ctx (perf only, max-running-requests=${LONG_MAX_RUNNING}) ====="
+        log "===== PHASE mtp / EAGLE long-ctx (max-running-requests=${LONG_MAX_RUNNING}) ====="
         start_server "mtp_longctx" "${eagle_args[@]}" --max-running-requests "$LONG_MAX_RUNNING"
         run_long_perf_if_needed
       fi
     fi
   else
-    log "Skip perf stages (--from-phase=${FROM_PHASE})"
+    log "Skip acc/perf stages (not in --phases)"
   fi
 
-  # ----- PROFILE (after all perf) -----
-  if [[ "$FROM_PHASE" == "perf" || "$FROM_PHASE" == "profile" ]]; then
-    run_all_profiles_after_perf
-  else
-    log "Skip profile stage (--from-phase=${FROM_PHASE})"
-  fi
+  # ----- PROFILE -----
+  run_all_profiles_after_perf
 
+  # ----- ANALYZE -----
   analyze_all_profiles
 
-  write_manifest
+  if [[ "$DRY_RUN" != true ]]; then
+    write_manifest
+  else
+    log "Skip manifest (dry-run)"
+  fi
 
   if (( PROFILE_FAILS > 0 || ANALYZE_FAILS > 0 )); then
     log "=== GLM env suite finished WITH FAILURES ==="
     log "profile_fails=${PROFILE_FAILS} analyze_fails=${ANALYZE_FAILS}"
-    log "Logs under: ${SUITE_ROOT}"
+    if [[ "$DRY_RUN" != true ]]; then
+      log "Logs under: ${SUITE_ROOT}"
+    fi
     exit 1
   fi
 
   log "=== GLM env suite finished OK ==="
+  if [[ "$DRY_RUN" == true ]]; then
+    log "Dry-run only; no suite dirs or outputs written"
+    return 0
+  fi
   log "Logs under: ${SUITE_ROOT}"
-  log "Perf:     ${SUITE_ROOT}/perf"
-  log "Acc:      ${SUITE_ROOT}/acc"
-  log "Profiles: ${SUITE_ROOT}/profiles"
-  log "Analyze:  ${SUITE_ROOT}/analyze"
+  if [[ "$WANT_PERF" == true ]]; then
+    log "Perf:     ${SUITE_ROOT}/perf"
+  fi
+  if [[ "$WANT_ACC" == true ]]; then
+    log "Acc:      ${SUITE_ROOT}/acc"
+  fi
+  if [[ "$WANT_PROFILE" == true ]]; then
+    log "Profiles: ${SUITE_ROOT}/profiles"
+  fi
+  if [[ "$WANT_ANALYZE" == true ]]; then
+    log "Analyze:  ${SUITE_ROOT}/analyze"
+  fi
 }
 
 main "$@"

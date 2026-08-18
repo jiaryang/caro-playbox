@@ -28,6 +28,16 @@ def accept_length_for(d, jsonl_path):
     return None
 
 
+# Report metric columns (CSV / Excel), in display order.
+METRIC_COLS = [
+    "Interactivity (tok/s/user)",
+    "Token TPUT per GPU",
+    "MedianTTFT",
+    "MedianTPOT",
+    "MedianITL",
+]
+
+
 def main():
     result_dir = sys.argv[1]
     prefix = sys.argv[2]
@@ -59,7 +69,7 @@ def main():
 
     hdr = (
         f"{'input':>8} {'conc':>4} {'act_conc':>8} "
-        f"{'TTFT_ms':>10} {'TPOT_ms':>9} {'out_tok/s':>10} {'tot/gpu':>10} {'interact':>9}"
+        f"{'interact':>9} {'tot/gpu':>10} {'TTFT_ms':>10} {'TPOT_ms':>9} {'ITL_ms':>9}"
     )
     if show_accept:
         hdr += f" {'accept':>7}"
@@ -69,20 +79,22 @@ def main():
     table = []
     for d, path in entries:
         tpot = d.get("median_tpot_ms", 0) or 0
+        itl = d.get("median_itl_ms", 0) or 0
         interactivity = 1000.0 / tpot if tpot else 0.0
         ng = num_gpus_for(d, default_num_gpus)
         total_tput = d.get("total_throughput", 0) or 0
         total_per_gpu = total_tput / ng if ng else 0.0
         accept_len = accept_length_for(d, path)
+        ttft = d.get("median_ttft_ms", 0) or 0
         line = (
             f"{d.get('random_input_len', 0):>8} "
             f"{d.get('max_concurrency', 0):>4} "
             f"{d.get('concurrency', 0):>8.2f} "
-            f"{d.get('median_ttft_ms', 0):>10.1f} "
-            f"{tpot:>9.3f} "
-            f"{d.get('output_throughput', 0):>10.2f} "
+            f"{interactivity:>9.2f} "
             f"{total_per_gpu:>10.2f} "
-            f"{interactivity:>9.2f}"
+            f"{ttft:>10.1f} "
+            f"{tpot:>9.3f} "
+            f"{itl:>9.3f}"
         )
         if show_accept:
             line += f" {accept_len:>7.2f}" if accept_len is not None else f" {'-':>7}"
@@ -91,23 +103,17 @@ def main():
             "input_len": d.get("random_input_len", 0),
             "max_concurrency": d.get("max_concurrency", 0),
             "actual_concurrency": round(d.get("concurrency", 0), 2),
-            "TTFT_median_ms": round(d.get("median_ttft_ms", 0), 1),
-            "TPOT_median_ms": round(tpot, 3),
-            "output_tok_per_s": round(d.get("output_throughput", 0), 2),
-            "total_tok_per_gpu": round(total_per_gpu, 2),
-            "interactivity_tok_per_s": round(interactivity, 2),
+            "Interactivity (tok/s/user)": round(interactivity, 2),
+            "Token TPUT per GPU": round(total_per_gpu, 2),
+            "MedianTTFT": round(ttft, 1),
+            "MedianTPOT": round(tpot, 3),
+            "MedianITL": round(itl, 3),
         }
         if show_accept:
             row["accept_length"] = round(accept_len, 2) if accept_len is not None else None
         table.append(row)
 
-    metric_cols = [
-        "TTFT_median_ms",
-        "TPOT_median_ms",
-        "output_tok_per_s",
-        "total_tok_per_gpu",
-        "interactivity_tok_per_s",
-    ]
+    metric_cols = list(METRIC_COLS)
     if show_accept:
         metric_cols.append("accept_length")
     input_lens = sorted({r["input_len"] for r in table})
