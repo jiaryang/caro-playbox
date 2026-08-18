@@ -614,11 +614,14 @@ clear_decode_traces() {
     [[ -n "$f" ]] || continue
     parent="$(dirname "$f")"
     rm -f "$f"
-    # Drop empty timestamp dirs left behind.
+    # Drop empty timestamp dirs left behind after deleting files.
     if [[ -d "$parent" && "$parent" != "$dir" ]]; then
       rmdir "$parent" 2>/dev/null || true
     fi
   done < <(_profile_trace_list "$dir" "$conc")
+  # Also drop empty timestamp dirs from failed attempts that never wrote
+  # any *.trace.json.gz (segfault during /start_profile leaves mkdir-only shells).
+  find "$dir" -mindepth 1 -maxdepth 1 -type d -empty -delete 2>/dev/null || true
 }
 
 io_tag_from_pair() {
@@ -657,7 +660,7 @@ validate_profile_dir() {
   local analyzer_root="$PROFILE_ANALYZER_ROOT"
   local rules="${analyzer_root}/rules/glm52.csv"
   local py_path="${analyzer_root}${PYTHONPATH:+:${PYTHONPATH}}"
-  local vrc
+  local vrc errexit_was=0
   local -a conc_args=()
 
   if [[ "$DRY_RUN" == true ]]; then
@@ -672,6 +675,7 @@ validate_profile_dir() {
     conc_args=(--conc "$conc")
   fi
 
+  [[ $- == *e* ]] && errexit_was=1
   set +e
   (
     cd "$analyzer_root"
@@ -687,7 +691,7 @@ validate_profile_dir() {
       "${conc_args[@]}"
   )
   vrc=$?
-  set -e
+  (( errexit_was )) && set -e
   return "$vrc"
 }
 
@@ -932,7 +936,9 @@ run_one_profile() {
       --profile-num-steps "$PROFILE_NUM_STEPS" \
       --perf-result-dir "$stub"
     rc=$?
-    set -e
+    # Keep errexit off until this function returns. Re-enabling set -e here made
+    # a later `return 1` abort the whole suite (bash errexit + non-zero return),
+    # skipping mtp/analyze. Caller wraps us in set +e / set -e.
 
     ntraces="$(count_decode_traces "$pdir" "$conc")"
     log "Profile attempt ${attempt}/${attempts}: sweep_rc=${rc} decode_traces=${ntraces} conc=${conc}"
@@ -952,6 +958,7 @@ run_one_profile() {
 
     if (( ntraces <= 0 )); then
       log "WARN: no DECODE traces for ${CURRENT_MODE}/${tag} (attempt ${attempt}/${attempts})"
+      clear_decode_traces "$pdir" "$conc"
       if (( attempt < attempts )); then
         restart_current_server
       fi
