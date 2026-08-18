@@ -1,7 +1,7 @@
 """DeepSeek-V4-Flash-FP8 combined test suite (8-GPU, AMD ROCm / MI325).
 
-NOTE (caro-playbox): this file is a stray copy under ``sglang/`` bench toolkit
-and is NOT wired into ``run_glm_env_suite.sh``. Canonical location is
+NOTE (caro-playbox): archived stray copy; not part of the GLM suite.
+Canonical location is
 ``sglang/test/registered/amd/test_deepseek_v4_flash_fp8_suite.py`` in the
 SGLang checkout. Prefer running it from there.
 

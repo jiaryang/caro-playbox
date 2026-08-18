@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# GLM env suite (serving/sglang/suites/glm):
+# GLM env suite (sglang/suites/glm):
 #   accuracy verify + perf sweep + 8k-only trace collect + trace analysis
 #   for both non-MTP and MTP (EAGLE).
 #
@@ -24,11 +24,11 @@ if [[ -z "${BASH_VERSION:-}" ]]; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SGLANG_ENGINE_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"   # serving/sglang
-REPO_ROOT="$(cd "${SGLANG_ENGINE_DIR}/../.." && pwd)"    # caro-playbox
-LIB_DIR="${SGLANG_ENGINE_DIR}/lib"
+SGLANG_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"          # sglang/
+REPO_ROOT="$(cd "${SGLANG_DIR}/.." && pwd)"              # caro-playbox
+LIB_DIR="${SGLANG_DIR}/lib"
 SWEEP_BENCH="${LIB_DIR}/sweep_bench.sh"
-RECIPE_GLM="${SGLANG_ENGINE_DIR}/recipes/glm.sh"
+RECIPE_GLM="${SGLANG_DIR}/recipes/glm.sh"
 PROFILE_ANALYZER_ROOT_DEFAULT="${REPO_ROOT}/analysis"
 
 # shellcheck source=../../recipes/glm.sh

@@ -1,48 +1,55 @@
 # caro-playbox
 
-Personal AMD / ROCm sandbox, laid out for multiple **serving engines** and
-**models** without flattening everything at the repo root.
+AMD / ROCm sandbox: env setup, SGLang suites, DECODE analysis, and one-off experiments.
 
-## Layout
-
-| Path | Role |
-|------|------|
-| [`env/`](env/) | Host / conda / TheRock / PyTorch setup |
-| [`serving/`](serving/) | Perf / accuracy / profile orchestration (`<engine>/<model>`) |
-| [`analysis/`](analysis/) | DECODE trace analysis (`decode_profile`, rules, tools) |
-| [`experiments/`](experiments/) | One-off HIP / PyTorch / JAX / TF / HF / OpenAI toys |
-| [`archive/`](archive/) | Deprecated scripts and old reports |
-
-## Active GLM workflow
-
-```bash
-bash serving/sglang/suites/glm/run_env_suite.sh
-
-# Stages: acc → perf (1k + 8k + 70k) → DECODE only for 8k → analyze
-# Modes: nomtp then mtp
+```
+env/                 host / conda / TheRock / PyTorch
+sglang/
+  lib/               client: perf / acc / profile (talks to a live server)
+  recipes/           server launch args (per model)
+  suites/<model>/    orchestrator (IO matrix, phases)
+analysis/
+  decode_profile/    python -m decode_profile.single | .sweep
+  rules/             kernel category CSVs
+  tools/             extra CLIs
+experiments/         HIP / pyt / jax / tf / hf / openai / scratch
+archive/             deprecated scripts & old reports
 ```
 
-Workload matrix (documented in the suite README):
+## Run GLM suite
+
+```bash
+bash sglang/suites/glm/run_env_suite.sh
+bash sglang/suites/glm/run_env_suite.sh --only-nomtp --skip-long-ctx
+bash sglang/suites/glm/run_env_suite.sh --help
+```
+
+Phases: **acc → perf → trace (8k only) → analyze**. Modes: nomtp then mtp.
 
 | IO | Perf | Trace / analyze |
 |----|------|-----------------|
-| 1024:1024 | yes | no |
-| 8192:1024 | yes | yes |
-| 70000:300 (+ max-running-requests) | yes | no |
+| `1024:1024` | yes | no |
+| `8192:1024` | yes | yes |
+| `70000:300` (+ `--max-running-requests`) | yes | no |
+
+Outputs under `sglang/suites/glm/suite_glm_env_<ts>/`.
+
+## Analyze traces
 
 ```bash
-cd analysis && PYTHONPATH=. python -m decode_profile.single \
-  --dir ../serving/sglang/suites/glm/suite_glm_env_<ts>/profiles/nomtp/i8192_o1024 \
-  --label nomtp --rules rules/glm52.csv -o out.xlsx
+cd analysis
+pip install -r requirements.txt
+PYTHONPATH=. python -m decode_profile.single \
+  --dir /path/to/profiles --label nomtp --rules rules/glm52.csv -o out.xlsx
 ```
 
-## Adding a model (same engine)
+Works for both plain (`decode`) and MTP (`draft` / `target_verify` / `draft_extend`) traces.
 
-1. `serving/sglang/recipes/<model>.sh`
-2. `serving/sglang/suites/<model>/run_env_suite.sh` (+ own IO/trace matrix)
-3. Optional `analysis/rules/<model>.csv`
+## Extend
 
-## Adding an engine
+| Add | Where |
+|-----|--------|
+| Model | `sglang/recipes/<model>.sh` + `sglang/suites/<model>/` |
+| Kernel rules | `analysis/rules/<model>.csv` |
 
-Create `serving/<engine>/{lib,recipes,suites/<model>}/` with the same shape.
-Analysis stays shared under `analysis/`.
+If another serving engine shows up later, introduce a parent dir then — no need to invent `serving/<engine>/` early.

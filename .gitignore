@@ -8,14 +8,14 @@
 *.swp
 *~
 
-# Serving suite / sweep outputs
-serving/**/suite_*_env_*/
-serving/**/perf_*/
-serving/**/acc_*/
-serving/**/sweep_*/
-serving/**/*.log
-serving/**/*.jsonl
-serving/**/profile_sweep_logs/
+# SGLang suite / sweep outputs
+sglang/**/suite_*_env_*/
+sglang/**/perf_*/
+sglang/**/acc_*/
+sglang/**/sweep_*/
+sglang/**/*.log
+sglang/**/*.jsonl
+sglang/**/profile_sweep_logs/
 
 # Analysis workbooks
 analysis/*.xlsx
