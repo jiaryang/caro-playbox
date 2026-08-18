@@ -16,6 +16,8 @@ sglang/**/sweep_*/
 sglang/**/*.log
 sglang/**/*.jsonl
 sglang/**/profile_sweep_logs/
+sglang/**/profile_logs/
+sglang/**/server_logs/
 
 # Analysis workbooks
 analysis/*.xlsx

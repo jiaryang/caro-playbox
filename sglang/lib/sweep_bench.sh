@@ -187,7 +187,11 @@ else
   BENCH_RESULT_DIR="$PERF_RESULT_DIR"
 fi
 
-bench_setup_logging "$BENCH_RESULT_DIR"
+if [[ "$PERF_PROFILE" == true ]]; then
+  bench_setup_logging "$BENCH_RESULT_DIR" --no-master-log
+else
+  bench_setup_logging "$BENCH_RESULT_DIR"
+fi
 
 if ! bench_resolve_sglang_root; then
   if [[ "$BENCH_MODE" == "acc" ]]; then
@@ -289,6 +293,12 @@ run_perf_sweep() {
       run_one "$ilen" "$olen" "$conc"
     done
   done
+
+  if [[ "$PERF_PROFILE" == true ]]; then
+    echo
+    echo "Profile client runs done (skip summarize_perf; traces under profile-output-dir)."
+    return 0
+  fi
 
   echo
   echo "Perf runs done. Summarizing -> ${result_dir}/summary.txt"

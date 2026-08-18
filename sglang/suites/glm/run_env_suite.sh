@@ -46,7 +46,7 @@ GLM suite stages (select with --phases; run in this order when included):
   [perf]    nomtp then mtp: 1024:1024 + 8192:1024, then 70000:300
   [profile] cuda-graph ON DECODE for 8192:1024 at conc 4,8,16,32,64,
             then conc=4 --disable-cuda-graph (nomtp then mtp)
-  [analyze] decode_profile.single hierarchical Excel (8k traces)
+  [analyze] decode_profile Excel + hierarchy .txt under analyze/
 
 IO matrix:
   1024:1024     perf only
@@ -446,12 +446,30 @@ wait_server_ready() {
   done
 }
 
+# Allocate server_logs/{phase}.server.log or {phase}.server.N.log (preserve prior runs).
+allocate_server_log() {
+  local phase_name="$1"
+  local dir="${SUITE_ROOT}/server_logs"
+  local base n
+  mkdir -p "$dir"
+  base="${dir}/${phase_name}.server.log"
+  if [[ ! -e "$base" ]]; then
+    echo "$base"
+    return 0
+  fi
+  n=1
+  while [[ -e "${dir}/${phase_name}.server.${n}.log" ]]; do
+    n=$((n + 1))
+  done
+  echo "${dir}/${phase_name}.server.${n}.log"
+}
+
 start_server() {
   local phase_name="$1"
   shift
   local -a extra=("$@")
   local -a args=()
-  local line
+  local line extra_summary=""
 
   CURRENT_PHASE="$phase_name"
   CURRENT_SERVER_EXTRA=("${extra[@]}")
@@ -464,23 +482,30 @@ start_server() {
 
   if ((${#extra[@]})); then
     args+=("${extra[@]}")
+    extra_summary=" extra=[${extra[*]}]"
   fi
   if [[ -n "$EXTRA_SERVER_ARGS" ]]; then
     # shellcheck disable=SC2206
     args+=($EXTRA_SERVER_ARGS)
+    extra_summary="${extra_summary} EXTRA_SERVER_ARGS"
   fi
 
-  SERVER_LOG="${SUITE_ROOT}/${phase_name}.server.log"
+  SERVER_LOG="$(allocate_server_log "$phase_name")"
   log "Launching server [${phase_name}] -> ${SERVER_LOG}"
-  log "Args: python3 -m sglang.launch_server ${args[*]}"
+  log "Args: model=${MODEL} tp=${TP}${extra_summary} (full cmdline in server log header)"
 
   if [[ "$DRY_RUN" == true ]]; then
     return 0
   fi
 
   kill_existing_server
+  {
+    echo "=== launch $(date '+%F %T') phase=${phase_name} ==="
+    echo "cmdline: python3 -m sglang.launch_server ${args[*]}"
+    echo
+  } >"$SERVER_LOG"
   # shellcheck disable=SC2086
-  python3 -m sglang.launch_server "${args[@]}" >"$SERVER_LOG" 2>&1 &
+  python3 -m sglang.launch_server "${args[@]}" >>"$SERVER_LOG" 2>&1 &
   SERVER_PID=$!
   log "Server PID=${SERVER_PID}"
   wait_server_ready
@@ -494,8 +519,14 @@ restart_current_server() {
   start_server "$CURRENT_PHASE" "${CURRENT_SERVER_EXTRA[@]}"
 }
 
-# True if /v1/models works and scheduler workers are alive (not zombie-only).
+# Count live (non-defunct) sglang scheduler processes.
+_scheduler_count() {
+  pgrep -af 'sglang::scheduler' 2>/dev/null | grep -vc '<defunct>' || true
+}
+
+# True if /v1/models works, parent alive, and >= TP schedulers (not zombie-only).
 server_is_healthy() {
+  local n_sched
   if [[ "$DRY_RUN" == true ]]; then
     return 0
   fi
@@ -505,12 +536,17 @@ server_is_healthy() {
   if [[ -n "${SERVER_PID:-}" ]] && ! kill -0 "$SERVER_PID" 2>/dev/null; then
     return 1
   fi
-  # launch_server parent alive but schedulers crashed -> zombie HTTP
-  if ! pgrep -f 'sglang::scheduler' >/dev/null 2>&1; then
+  n_sched="$(_scheduler_count)"
+  if ! [[ "$n_sched" =~ ^[0-9]+$ ]] || (( n_sched < TP )); then
     return 1
   fi
-  if pgrep -af 'sglang::schedul' 2>/dev/null | grep -q '<defunct>'; then
-    return 1
+  if [[ -n "${SERVER_LOG:-}" && -f "$SERVER_LOG" ]]; then
+    if grep -qE 'Scheduler watchdog timeout|Scheduler hit an exception' "$SERVER_LOG" 2>/dev/null; then
+      # Fresh errors near end of log: check last 80 lines
+      if tail -n 80 "$SERVER_LOG" | grep -qE 'Scheduler watchdog timeout|Scheduler hit an exception'; then
+        return 1
+      fi
+    fi
   fi
   return 0
 }
@@ -527,7 +563,19 @@ server_smoke_ok() {
     >/dev/null 2>&1
 }
 
-# Optional conc: only files whose basename matches _c<N>[-_.] (not c4 vs c40).
+# Optional conc: all stage traces (*DECODE* / *EXTEND* / …) matching _cN.
+_profile_trace_list() {
+  local dir="$1"
+  local conc="${2:-}"
+  [[ -d "$dir" ]] || return 0
+  if [[ -n "$conc" ]]; then
+    find "$dir" -type f -name '*.trace.json.gz' 2>/dev/null \
+      | grep -E "_c${conc}[-_.]" || true
+  else
+    find "$dir" -type f -name '*.trace.json.gz' 2>/dev/null || true
+  fi
+}
+
 _decode_trace_list() {
   local dir="$1"
   local conc="${2:-}"
@@ -549,12 +597,18 @@ count_decode_traces() {
 clear_decode_traces() {
   local dir="$1"
   local conc="${2:-}"
-  local f
+  local f parent
   [[ -d "$dir" ]] || return 0
+  # Clear all stages for this conc (DECODE/EXTEND/…), not only DECODE.
   while IFS= read -r f; do
     [[ -n "$f" ]] || continue
+    parent="$(dirname "$f")"
     rm -f "$f"
-  done < <(_decode_trace_list "$dir" "$conc")
+    # Drop empty timestamp dirs left behind.
+    if [[ -d "$parent" && "$parent" != "$dir" ]]; then
+      rmdir "$parent" 2>/dev/null || true
+    fi
+  done < <(_profile_trace_list "$dir" "$conc")
 }
 
 io_tag_from_pair() {
@@ -734,7 +788,6 @@ run_sweep_watched() {
     return
   fi
 
-  log "Watchdog on: poll=${PROFILE_WATCHDOG_SEC}s wall_timeout=${timeout_sec}s"
   run_sweep "$@" &
   local spid=$!
   SWEEP_PID="$spid"
@@ -831,7 +884,7 @@ run_one_profile() {
   local tag
   tag="$(io_tag_from_pair "$io")${tag_suffix}"
   local pdir="${SUITE_ROOT}/profiles/${CURRENT_MODE}/${tag}"
-  local stub="${SUITE_ROOT}/profile_sweep_logs/${CURRENT_MODE}/${tag}/c${conc}"
+  local stub="${SUITE_ROOT}/profile_logs/${CURRENT_MODE}/${tag}/c${conc}"
   local attempts=$((PROFILE_RETRIES + 1))
   local attempt rc ntraces max_wall sweep_timeout profile_olen
 
@@ -843,10 +896,9 @@ run_one_profile() {
     profile_olen=64
   fi
   log "===== PROFILE mode=${CURRENT_MODE} io=${io} conc=${conc} dir=${pdir} ====="
-  log "Trace checks: expected_steps=${PROFILE_NUM_STEPS} min_steps=${PROFILE_MIN_STEPS} max_wall_ms=${max_wall} sweep_timeout=${sweep_timeout}s watchdog=${PROFILE_WATCHDOG_SEC}s profile_output_len=${profile_olen} (dir tag keeps TRACE_IO)"
 
   if [[ "$DRY_RUN" == true ]]; then
-    log "DRY-RUN profile: --perf-io-pairs ${io} --perf-concurrencies ${conc} --profile --profile-output-dir ${pdir} (actual output_len=${profile_olen})"
+    log "DRY-RUN profile: stub=${stub} traces=${pdir} --perf-io-pairs ${io} --perf-concurrencies ${conc} --profile (actual output_len=${profile_olen})"
     return 0
   fi
 
@@ -906,9 +958,10 @@ run_one_profile() {
       continue
     fi
 
+    # Traces are good; do not cold-restart just because smoke fails (next conc
+    # still checks health before starting). Avoids useless reboot after last nocg.
     if ! server_smoke_ok; then
-      log "WARN: server unhealthy after profile (traces kept=${ntraces}); will restart"
-      restart_current_server
+      log "WARN: server unhealthy after profile (traces kept=${ntraces}); not restarting"
     fi
     log "Profile OK for ${CURRENT_MODE}/${tag} (decode_traces=${ntraces})"
     return 0
@@ -975,7 +1028,12 @@ run_all_profiles_after_perf() {
     return 0
   fi
 
+  local max_wall profile_olen_note
+  max_wall="$(profile_max_wall_for_io "$TRACE_IO")"
+  profile_olen_note="nomtp=64 mtp=128"
   log "===== PROFILE PHASE (TRACE_IO=${TRACE_IO}) ====="
+  log "Trace checks: expected_steps=${PROFILE_NUM_STEPS} min_steps=${PROFILE_MIN_STEPS} max_wall_ms=${max_wall} (scaled by IO) watchdog=${PROFILE_WATCHDOG_SEC}s profile_output_len=${profile_olen_note}"
+  log "Watchdog: poll=${PROFILE_WATCHDOG_SEC}s wall_timeout=auto max(600,conc*30) (nocg 2x)"
 
   local -a eagle_args=()
   local line
@@ -990,7 +1048,7 @@ run_all_profiles_after_perf() {
   if [[ "$ONLY_MTP" != true ]]; then
     CURRENT_MODE="nomtp"
     log "===== PROFILE nomtp / TRACE_IO=${TRACE_IO} (cuda-graph ON, conc=${PROFILE_CONCURRENCIES}) ====="
-    start_server "nomtp_baseline"
+    start_server "nomtp_profile"
     run_profile_ios_if_needed "$TRACE_IO" trace
 
     if [[ "$SKIP_NOCG_PROFILE" == true ]]; then
@@ -1005,7 +1063,7 @@ run_all_profiles_after_perf() {
   if [[ "$ONLY_NOMTP" != true ]]; then
     CURRENT_MODE="mtp"
     log "===== PROFILE mtp / TRACE_IO=${TRACE_IO} (cuda-graph ON, conc=${PROFILE_CONCURRENCIES}) ====="
-    start_server "mtp_baseline" "${eagle_args[@]}"
+    start_server "mtp_profile" "${eagle_args[@]}"
     run_profile_ios_if_needed "$TRACE_IO" trace
 
     if [[ "$SKIP_NOCG_PROFILE" == true ]]; then
@@ -1030,7 +1088,7 @@ analyze_all_profiles() {
   mkdir -p "$out_dir"
 
   if [[ "$DRY_RUN" == true ]]; then
-    log "DRY-RUN: would single-side analyze each profiles/{nomtp,mtp}/<io> -> ${out_dir}"
+    log "DRY-RUN: would single-side analyze each profiles/{nomtp,mtp}/<io> -> ${out_dir}/*.xlsx + *.txt"
     return 0
   fi
   if [[ ! -d "$analyzer_root/decode_profile" ]]; then
@@ -1043,7 +1101,7 @@ analyze_all_profiles() {
   log "MTP phases expected: draft / target_verify / draft_extend"
 
   local py_path="${analyzer_root}${PYTHONPATH:+:${PYTHONPATH}}"
-  local mode_dir mode tag_dir tag ntraces out_xlsx
+  local mode_dir mode tag_dir tag ntraces out_xlsx out_txt
 
   shopt -s nullglob
   for mode_dir in "${SUITE_ROOT}/profiles/"*; do
@@ -1058,7 +1116,8 @@ analyze_all_profiles() {
         continue
       fi
       out_xlsx="${out_dir}/${mode}_${tag}.xlsx"
-      log "Analyze ${mode}/${tag} (decode_traces=${ntraces}) -> ${out_xlsx}"
+      out_txt="${out_dir}/${mode}_${tag}.txt"
+      log "Analyze ${mode}/${tag} (decode_traces=${ntraces}) -> ${out_xlsx} + ${out_txt}"
       set +e
       (
         cd "$analyzer_root"
@@ -1067,8 +1126,9 @@ analyze_all_profiles() {
           --label "$mode" \
           --rules "$rules" \
           -o "$out_xlsx"
-      )
-      local arc=$?
+      ) 2>&1 | tee "$out_txt"
+      local arc
+      arc=${PIPESTATUS[0]}
       set -e
       if (( arc != 0 )); then
         log "WARN: analyze failed for ${mode}/${tag} (rc=${arc})"
@@ -1112,7 +1172,8 @@ write_manifest() {
     echo "  acc=${SUITE_ROOT}/acc/"
     echo "  perf=${SUITE_ROOT}/perf/"
     echo "  profiles=${SUITE_ROOT}/profiles/"
-    echo "  profile_sweep_logs=${SUITE_ROOT}/profile_sweep_logs/"
+    echo "  profile_logs=${SUITE_ROOT}/profile_logs/"
+    echo "  server_logs=${SUITE_ROOT}/server_logs/"
     echo "  analyze=${SUITE_ROOT}/analyze/"
     echo "  suite_log=${SUITE_LOG}"
   } >"$mf"
@@ -1135,8 +1196,9 @@ cleanup() {
 
 main() {
   if [[ -n "$SUITE_DIR_OVERRIDE" ]]; then
+    mkdir -p "$SUITE_DIR_OVERRIDE"
     SUITE_ROOT="$(cd "$SUITE_DIR_OVERRIDE" && pwd)"
-    mkdir -p "$SUITE_ROOT"
+    mkdir -p "$SUITE_ROOT" "${SUITE_ROOT}/server_logs"
     SUITE_LOG="${SUITE_ROOT}/suite.log"
     touch "$SUITE_LOG"
   elif [[ "$DRY_RUN" == true ]]; then
@@ -1147,7 +1209,7 @@ main() {
     local ts
     ts="$(date +%Y%m%d_%H%M%S)"
     SUITE_ROOT="${SCRIPT_DIR}/suite_glm_env_${ts}"
-    mkdir -p "$SUITE_ROOT"
+    mkdir -p "$SUITE_ROOT" "${SUITE_ROOT}/server_logs"
     SUITE_LOG="${SUITE_ROOT}/suite.log"
     touch "$SUITE_LOG"
   fi
@@ -1247,6 +1309,7 @@ main() {
   log "=== GLM env suite finished OK ==="
   if [[ "$DRY_RUN" == true ]]; then
     log "Dry-run only; no suite dirs or outputs written"
+    log "Would write: server_logs/ profile_logs/ profiles/ analyze/ under ${SUITE_ROOT}"
     return 0
   fi
   log "Logs under: ${SUITE_ROOT}"
@@ -1258,6 +1321,8 @@ main() {
   fi
   if [[ "$WANT_PROFILE" == true ]]; then
     log "Profiles: ${SUITE_ROOT}/profiles"
+    log "Profile stubs: ${SUITE_ROOT}/profile_logs"
+    log "Server logs: ${SUITE_ROOT}/server_logs"
   fi
   if [[ "$WANT_ANALYZE" == true ]]; then
     log "Analyze:  ${SUITE_ROOT}/analyze"

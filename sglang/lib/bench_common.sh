@@ -22,15 +22,24 @@ bench_on_err() {
 
 bench_setup_logging() {
   local result_dir="$1"
+  local mode="${2:-}"
   mkdir -p "$result_dir" || bench_die "cannot create result directory: ${result_dir}"
   result_dir="$(cd "$result_dir" && pwd)" || bench_die "cannot access result directory: ${result_dir}"
+
+  set -E
+  trap 'bench_on_err' ERR
+
+  # Profile stubs: keep per-run .log only; skip master sweep.log (duplicates client tee).
+  if [[ "$mode" == "--no-master-log" ]]; then
+    BENCH_MASTER_LOG=""
+    echo "Result dir: ${result_dir} (no master sweep.log)"
+    return 0
+  fi
 
   BENCH_MASTER_LOG="${result_dir}/sweep.log"
   : > "$BENCH_MASTER_LOG"
 
   exec > >(tee -a "$BENCH_MASTER_LOG") 2>&1
-  set -E
-  trap 'bench_on_err' ERR
 
   echo "Master log: ${BENCH_MASTER_LOG}"
 }
