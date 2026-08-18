@@ -413,6 +413,9 @@ kill_existing_server() {
   die "port ${PORT} still busy after stop"
 }
 
+# Marker printed by launch_server once the new process is fully serving.
+SERVER_READY_MARKER="The server is fired up and ready to roll!"
+
 wait_server_ready() {
   local url="http://${HOST}:${PORT}/v1/models"
   local start now elapsed
@@ -421,13 +424,18 @@ wait_server_ready() {
   if [[ "$DRY_RUN" == true ]]; then
     return 0
   fi
+  # Gate on the fresh $SERVER_LOG marker (truncated each start_server via '>'),
+  # not just HTTP: a lingering/old endpoint can answer /v1/models before the
+  # new process has loaded, producing a false "ready" right after a restart.
   while true; do
-    if curl -fsS -m 5 "$url" >/dev/null 2>&1; then
-      log "Server is ready"
-      return 0
-    fi
     if [[ -n "${SERVER_PID:-}" ]] && ! kill -0 "$SERVER_PID" 2>/dev/null; then
       die "server process exited early; see ${SERVER_LOG}"
+    fi
+    if [[ -f "$SERVER_LOG" ]] && grep -qF "$SERVER_READY_MARKER" "$SERVER_LOG"; then
+      if curl -fsS -m 5 "$url" >/dev/null 2>&1; then
+        log "Server is ready"
+        return 0
+      fi
     fi
     now="$(date +%s)"
     elapsed=$((now - start))
