@@ -783,6 +783,19 @@ run_acc_if_needed() {
   run_sweep acc --acc-result-dir "${SUITE_ROOT}/acc/${CURRENT_MODE}"
 }
 
+# The baseline (no --max-running-requests) server only serves acc + short-ctx
+# perf. Skip launching it entirely when neither is requested (e.g. resuming a
+# suite with only the long-ctx 70000:300 sweep left).
+baseline_server_needed() {
+  if [[ "$WANT_ACC" == true ]]; then
+    return 0
+  fi
+  if [[ "$WANT_PERF" == true && "$SKIP_SHORT" != true ]]; then
+    return 0
+  fi
+  return 1
+}
+
 run_short_perf_if_needed() {
   if [[ "$WANT_PERF" != true || "$SKIP_SHORT" == true ]]; then
     log "Skip short-ctx perf (${SHORT_IO})"
@@ -1161,10 +1174,14 @@ main() {
   if [[ "$WANT_ACC" == true || "$WANT_PERF" == true ]]; then
     if [[ "$ONLY_MTP" != true ]]; then
       CURRENT_MODE="nomtp"
-      log "===== PHASE nomtp / baseline ====="
-      start_server "nomtp_baseline"
-      run_acc_if_needed
-      run_short_perf_if_needed
+      if baseline_server_needed; then
+        log "===== PHASE nomtp / baseline ====="
+        start_server "nomtp_baseline"
+        run_acc_if_needed
+        run_short_perf_if_needed
+      else
+        log "Skip nomtp / baseline server (no acc, short-ctx skipped)"
+      fi
 
       if [[ "$WANT_PERF" != true || "$SKIP_LONG" == true ]]; then
         log "Skip nomtp / long-ctx phase"
@@ -1185,10 +1202,14 @@ main() {
         eagle_args+=($line)
       done < <(eagle_server_args)
 
-      log "===== PHASE mtp / EAGLE baseline ====="
-      start_server "mtp_baseline" "${eagle_args[@]}"
-      run_acc_if_needed
-      run_short_perf_if_needed
+      if baseline_server_needed; then
+        log "===== PHASE mtp / EAGLE baseline ====="
+        start_server "mtp_baseline" "${eagle_args[@]}"
+        run_acc_if_needed
+        run_short_perf_if_needed
+      else
+        log "Skip mtp / EAGLE baseline server (no acc, short-ctx skipped)"
+      fi
 
       if [[ "$WANT_PERF" != true || "$SKIP_LONG" == true ]]; then
         log "Skip mtp / long-ctx phase"
