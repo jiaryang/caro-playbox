@@ -96,7 +96,8 @@ Options:
                                max(600, conc*30), nocg 2x; 0=no wall
                                timeout)
   --profile-analyzer-root PATH (default: <repo>/analysis)
-  --suite-dir PATH             reuse an existing suite dir (no new timestamp)
+  --suite-dir PATH             reuse an existing suite dir (required for
+                               --phases analyze alone; no new timestamp)
   --only-nomtp                 only nomtp (no EAGLE)
   --only-mtp                   only mtp / EAGLE
   --keep-server                do not stop server at the very end
@@ -246,6 +247,15 @@ parse_phases "$PHASES"
 if [[ "$ONLY_NOMTP" == true && "$ONLY_MTP" == true ]]; then
   echo "ERROR: --only-nomtp and --only-mtp are mutually exclusive" >&2
   exit 1
+fi
+
+# analyze-only reuses existing traces; never mint an empty suite_glm_env_<ts>/.
+if [[ "$WANT_ANALYZE" == true && "$WANT_ACC" != true && "$WANT_PERF" != true && "$WANT_PROFILE" != true ]]; then
+  if [[ -z "$SUITE_DIR_OVERRIDE" ]]; then
+    echo "ERROR: --phases analyze requires --suite-dir <existing suite_glm_env_*>" >&2
+    echo "  example: bash run_env_suite.sh --suite-dir suite_glm_env_20260818_115622 --phases analyze" >&2
+    exit 1
+  fi
 fi
 
 # Resolve GPU vendor + default model (AMD MXFP4 / NVIDIA NVFP4).

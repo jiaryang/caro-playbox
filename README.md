@@ -48,7 +48,7 @@ Select with `--phases` (default `acc,perf,profile,analyze`). Order among selecte
 # resume profiles + analyze on an existing suite
 bash sglang/suites/glm/run_env_suite.sh --suite-dir suite_glm_env_<ts> --phases profile,analyze
 
-# re-analyze only
+# re-analyze only ( --suite-dir is required; otherwise no new empty suite is created )
 bash sglang/suites/glm/run_env_suite.sh --suite-dir suite_glm_env_<ts> --phases analyze
 ```
 
