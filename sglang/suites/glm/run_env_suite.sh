@@ -9,7 +9,7 @@
 #   8192:1024           perf + DECODE trace + analyze  (baseline)
 #   70000:300           perf only  (server --max-running-requests)
 #
-# Order: all perf (nomtp then mtp) -> profile 8k only -> analyze.
+# Order: all perf (nomtp then mtp) -> profile 8k (cg-on, then c4 nocg) -> analyze.
 #
 # Usage:
 #   bash run_env_suite.sh
@@ -41,7 +41,8 @@ Usage: run_env_suite.sh [options]
 GLM suite stages:
   [acc]     GSM8K accuracy (per mode)
   [perf]    nomtp then mtp: 1024:1024 + 8192:1024, then 70000:300
-  [profile] after all perf: baseline server, DECODE only for 8192:1024
+  [profile] after all perf: baseline DECODE for 8192:1024, then
+            conc=4 --disable-cuda-graph (op compare) for nomtp+mtp
   [analyze] decode_profile.single hierarchical Excel (8k traces)
 
 IO matrix:
@@ -72,6 +73,10 @@ Options:
   --skip-analyze               skip analysis after profiles
   --profile-num-steps N        profile decode steps  (default: 20)
   --profile-concurrencies N    conc list for profile only  (default: 8)
+  --profile-nocg-concurrencies N
+                               conc for disable-cuda-graph profile
+                               (default: 4)
+  --skip-nocg-profile          skip conc4 --disable-cuda-graph profiles
   --profile-retries N          retries after fail / bad trace  (default: 1)
   --profile-min-steps N        min acceptable DECODE steps
                                (default: max(5, 75% of num-steps))
@@ -113,8 +118,10 @@ SKIP_SHORT=false
 SKIP_LONG=false
 SKIP_PROFILE=false
 SKIP_ANALYZE=false
+SKIP_NOCG_PROFILE=false
 PROFILE_NUM_STEPS="20"
 PROFILE_CONCURRENCIES="8"
+PROFILE_NOCG_CONCURRENCIES="4"
 PROFILE_RETRIES="1"
 PROFILE_MIN_STEPS=""          # empty -> auto from PROFILE_NUM_STEPS
 PROFILE_MAX_WALL_MS="300"     # short-ctx default; long IO scaled in helper
@@ -159,8 +166,10 @@ while [[ $# -gt 0 ]]; do
     --skip-long-ctx)      SKIP_LONG=true; shift ;;
     --skip-profile)       SKIP_PROFILE=true; shift ;;
     --skip-analyze)       SKIP_ANALYZE=true; shift ;;
+    --skip-nocg-profile)  SKIP_NOCG_PROFILE=true; shift ;;
     --profile-num-steps)  PROFILE_NUM_STEPS="$2"; shift 2 ;;
     --profile-concurrencies) PROFILE_CONCURRENCIES="$2"; shift 2 ;;
+    --profile-nocg-concurrencies) PROFILE_NOCG_CONCURRENCIES="$2"; shift 2 ;;
     --profile-retries)    PROFILE_RETRIES="$2"; shift 2 ;;
     --profile-min-steps)  PROFILE_MIN_STEPS="$2"; shift 2 ;;
     --profile-max-wall-ms) PROFILE_MAX_WALL_MS="$2"; shift 2 ;;
@@ -582,10 +591,13 @@ run_long_perf_if_needed() {
 
 # One IO pair profile via sweep_bench --profile; restart server on failure
 # or when DECODE trace step/wall sanity checks fail.
+# Optional: conc override and tag_suffix (e.g. _c4_nocg for op-compare traces).
 run_one_profile() {
   local io="$1"
+  local conc="${2:-$PROFILE_CONCURRENCIES}"
+  local tag_suffix="${3:-}"
   local tag
-  tag="$(io_tag_from_pair "$io")"
+  tag="$(io_tag_from_pair "$io")${tag_suffix}"
   local pdir="${SUITE_ROOT}/profiles/${CURRENT_MODE}/${tag}"
   local stub="${SUITE_ROOT}/profile_sweep_logs/${CURRENT_MODE}/${tag}"
   local attempts=$((PROFILE_RETRIES + 1))
@@ -593,11 +605,11 @@ run_one_profile() {
 
   max_wall="$(profile_max_wall_for_io "$io")"
   mkdir -p "$pdir" "$stub"
-  log "===== PROFILE mode=${CURRENT_MODE} io=${io} dir=${pdir} ====="
+  log "===== PROFILE mode=${CURRENT_MODE} io=${io} conc=${conc} dir=${pdir} ====="
   log "Trace checks: expected_steps=${PROFILE_NUM_STEPS} min_steps=${PROFILE_MIN_STEPS} max_wall_ms=${max_wall}"
 
   if [[ "$DRY_RUN" == true ]]; then
-    log "DRY-RUN profile: --perf-io-pairs ${io} --perf-concurrencies ${PROFILE_CONCURRENCIES} --profile --profile-output-dir ${pdir}"
+    log "DRY-RUN profile: --perf-io-pairs ${io} --perf-concurrencies ${conc} --profile --profile-output-dir ${pdir}"
     return 0
   fi
 
@@ -613,7 +625,7 @@ run_one_profile() {
     set +e
     run_sweep perf \
       --perf-io-pairs "$io" \
-      --perf-concurrencies "$PROFILE_CONCURRENCIES" \
+      --perf-concurrencies "$conc" \
       --profile \
       --profile-output-dir "$pdir" \
       --profile-num-steps "$PROFILE_NUM_STEPS" \
@@ -656,7 +668,9 @@ run_one_profile() {
 
 run_profile_ios_if_needed() {
   local ios="$1"
-  local which="$2"   # short|long|trace
+  local which="$2"   # short|long|trace|nocg
+  local conc="${3:-$PROFILE_CONCURRENCIES}"
+  local tag_suffix="${4:-}"
   if [[ "$SKIP_PROFILE" == true ]]; then
     log "Skip profile (${which})"
     return 0
@@ -669,7 +683,10 @@ run_profile_ios_if_needed() {
     log "Skip long-ctx profile (${ios})"
     return 0
   fi
-  # which=trace: only gated by SKIP_PROFILE (8k DECODE collect)
+  if [[ "$which" == "nocg" && "$SKIP_NOCG_PROFILE" == true ]]; then
+    log "Skip nocg profile (${ios})"
+    return 0
+  fi
 
   local -a pairs=()
   local io prc
@@ -679,7 +696,7 @@ run_profile_ios_if_needed() {
     [[ -z "$io" ]] && continue
     # Do not abort the whole suite if one shape's profile fails.
     set +e
-    run_one_profile "$io"
+    run_one_profile "$io" "$conc" "$tag_suffix"
     prc=$?
     set -e
     if (( prc != 0 )); then
@@ -688,7 +705,8 @@ run_profile_ios_if_needed() {
   done
 }
 
-# After all perf: baseline servers only; DECODE for TRACE_IO (default 8k).
+# After all perf: baseline (cuda-graph ON) then conc4 --disable-cuda-graph
+# for op comparison. DECODE for TRACE_IO (default 8k) only.
 run_all_profiles_after_perf() {
   if [[ "$SKIP_PROFILE" == true ]]; then
     log "Skip all profiles"
@@ -709,16 +727,34 @@ run_all_profiles_after_perf() {
 
   if [[ "$ONLY_MTP" != true ]]; then
     CURRENT_MODE="nomtp"
-    log "===== PROFILE nomtp / TRACE_IO=${TRACE_IO} ====="
+    log "===== PROFILE nomtp / TRACE_IO=${TRACE_IO} (cuda-graph ON, conc=${PROFILE_CONCURRENCIES}) ====="
     start_server "nomtp_baseline"
     run_profile_ios_if_needed "$TRACE_IO" trace
+
+    if [[ "$SKIP_NOCG_PROFILE" == true ]]; then
+      log "Skip nomtp nocg profile (--skip-nocg-profile)"
+    else
+      log "===== PROFILE nomtp / TRACE_IO=${TRACE_IO} (disable-cuda-graph, conc=${PROFILE_NOCG_CONCURRENCIES}) ====="
+      start_server "nomtp_profile_nocg" --disable-cuda-graph
+      run_profile_ios_if_needed "$TRACE_IO" nocg \
+        "$PROFILE_NOCG_CONCURRENCIES" "_c${PROFILE_NOCG_CONCURRENCIES}_nocg"
+    fi
   fi
 
   if [[ "$ONLY_NOMTP" != true ]]; then
     CURRENT_MODE="mtp"
-    log "===== PROFILE mtp / TRACE_IO=${TRACE_IO} ====="
+    log "===== PROFILE mtp / TRACE_IO=${TRACE_IO} (cuda-graph ON, conc=${PROFILE_CONCURRENCIES}) ====="
     start_server "mtp_baseline" "${eagle_args[@]}"
     run_profile_ios_if_needed "$TRACE_IO" trace
+
+    if [[ "$SKIP_NOCG_PROFILE" == true ]]; then
+      log "Skip mtp nocg profile (--skip-nocg-profile)"
+    else
+      log "===== PROFILE mtp / TRACE_IO=${TRACE_IO} (disable-cuda-graph, conc=${PROFILE_NOCG_CONCURRENCIES}) ====="
+      start_server "mtp_profile_nocg" "${eagle_args[@]}" --disable-cuda-graph
+      run_profile_ios_if_needed "$TRACE_IO" nocg \
+        "$PROFILE_NOCG_CONCURRENCIES" "_c${PROFILE_NOCG_CONCURRENCIES}_nocg"
+    fi
   fi
 }
 
@@ -802,6 +838,8 @@ write_manifest() {
     echo "profile_min_steps=${PROFILE_MIN_STEPS}"
     echo "profile_max_wall_ms=${PROFILE_MAX_WALL_MS}"
     echo "profile_concurrencies=${PROFILE_CONCURRENCIES}"
+    echo "profile_nocg_concurrencies=${PROFILE_NOCG_CONCURRENCIES}"
+    echo "skip_nocg_profile=${SKIP_NOCG_PROFILE}"
     echo "only_nomtp=${ONLY_NOMTP}"
     echo "only_mtp=${ONLY_MTP}"
     echo "skip_acc=${SKIP_ACC} skip_perf=${SKIP_PERF} skip_profile=${SKIP_PROFILE} skip_analyze=${SKIP_ANALYZE}"
@@ -851,7 +889,7 @@ main() {
   log "HF_HOME=${HF_HOME}  SGLANG_ROOT=${SGLANG_ROOT}"
   log "Short IO=${SHORT_IO}  Long IO=${LONG_IO}  Trace IO=${TRACE_IO} (max-running-requests=${LONG_MAX_RUNNING})"
   log "Order: all perf first, then profile TRACE_IO only, then analyze"
-  log "Profile: skip=${SKIP_PROFILE} steps=${PROFILE_NUM_STEPS} min_steps=${PROFILE_MIN_STEPS} max_wall_ms=${PROFILE_MAX_WALL_MS} conc=${PROFILE_CONCURRENCIES} retries=${PROFILE_RETRIES}"
+  log "Profile: skip=${SKIP_PROFILE} steps=${PROFILE_NUM_STEPS} min_steps=${PROFILE_MIN_STEPS} max_wall_ms=${PROFILE_MAX_WALL_MS} conc=${PROFILE_CONCURRENCIES} nocg_conc=${PROFILE_NOCG_CONCURRENCIES} skip_nocg=${SKIP_NOCG_PROFILE} retries=${PROFILE_RETRIES}"
   log "Analyze: skip=${SKIP_ANALYZE} analyzer=${PROFILE_ANALYZER_ROOT}"
 
   # ----- PERF: non-MTP -----

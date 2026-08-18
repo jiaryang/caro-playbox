@@ -24,7 +24,12 @@ bash sglang/suites/glm/run_env_suite.sh --only-nomtp --skip-long-ctx
 bash sglang/suites/glm/run_env_suite.sh --help
 ```
 
-Phases: **acc → perf → trace (8k only) → analyze**. Modes: nomtp then mtp.
+Phases: **acc → perf → trace (8k) → analyze**. Modes: nomtp then mtp.
+
+Profile traces (8k only):
+- cuda-graph ON, default conc=8 → `profiles/{nomtp,mtp}/i8192_o1024/`
+- cuda-graph OFF, conc=4 (op compare) → `profiles/{nomtp,mtp}/i8192_o1024_c4_nocg/`
+  (`--skip-nocg-profile` to skip)
 
 | IO | Perf | Trace / analyze |
 |----|------|-----------------|
