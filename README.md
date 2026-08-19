@@ -13,8 +13,21 @@ analysis/
   rules/             kernel category CSVs
   tools/             extra CLIs
 experiments/         HIP / pyt / jax / tf / hf / openai / scratch
+  rccl/              allreduce microbench + host/ROCm/topo fingerprints
 archive/             deprecated scripts & old reports
 ```
+
+## RCCL / fabric probe (cross-node)
+
+Same docker image can still disagree on EXTEND all-reduce. Collect fingerprints and
+run `all_reduce_perf` on each machine:
+
+```bash
+GPUS=4,5,6,7 bash experiments/rccl/run_allreduce_bench.sh
+python experiments/rccl/compare_runs.py <result_dir_a> <result_dir_b>
+```
+
+See `experiments/rccl/README.md`.
 
 ## Run GLM suite
 
