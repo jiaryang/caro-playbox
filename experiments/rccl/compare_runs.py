@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """Compare two experiments/rccl result directories (info + all_reduce_perf logs).
 
-    python experiments/rccl/compare_runs.py ~/rccl_m11 ~/rccl_n10
+Prefer the slim bundles written by run_allreduce_bench.sh:
+
+    python experiments/rccl/compare_runs.py ~/rccl_m11/compare ~/rccl_n10/compare
+
+Full OUT_DIR also works if it still has info/ + bench/sweep.log.
 """
 
 from __future__ import annotations

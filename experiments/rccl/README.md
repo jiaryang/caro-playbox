@@ -7,8 +7,9 @@ RCCL performance — host driver, firmware, XGMI topology, and clocks matter.
 This tool:
 
 1. Collects host / ROCm / topology / library fingerprints
-2. Builds or reuses [ROCm/rccl-tests](https://github.com/ROCm/rccl-tests)
+2. Builds or **reuses** [ROCm/rccl-tests](https://github.com/ROCm/rccl-tests) from a shared cache
 3. Runs `all_reduce_perf` with configs aligned to GLM TP4 workloads
+4. Writes a slim **`OUT_DIR/compare/`** bundle for cross-node compare
 
 > **Caveat:** SGLang GLM EXTEND on MI355 often uses **quickreduce** AllReduce
 > (not plain `rcclAllReduce`). These microbenches are a **fabric / driver proxy**.
@@ -30,12 +31,11 @@ GPUS=4,5,6,7 OUT_DIR=/tmp/rccl_m11 \
 # info only (no compile / no bench)
 bash experiments/rccl/run_allreduce_bench.sh --info-only
 
-# reuse a prebuilt binary
-RCCL_TESTS_DIR=/path/to/rccl-tests/build \
-  bash experiments/rccl/run_allreduce_bench.sh
+# force rebuild of rccl-tests (normally skipped if binary exists)
+FORCE_BUILD=1 bash experiments/rccl/run_allreduce_bench.sh
 ```
 
-Compare two machines:
+Compare two machines (share the **compare** folder only):
 
 ```bash
 # on m11-13
@@ -44,9 +44,34 @@ OUT_DIR=~/rccl_m11 bash experiments/rccl/run_allreduce_bench.sh
 # on n10-17
 OUT_DIR=~/rccl_n10 bash experiments/rccl/run_allreduce_bench.sh
 
-# anywhere with both result trees
-python experiments/rccl/compare_runs.py ~/rccl_m11 ~/rccl_n10
+# anywhere with both compare trees
+python experiments/rccl/compare_runs.py ~/rccl_m11/compare ~/rccl_n10/compare
 ```
+
+## Output layout
+
+```
+OUT_DIR/
+  manifest.txt summary.txt
+  info/          # fingerprints
+  bench/         # sweep.log, fixed_*.log, optional build.log
+  compare/       # <-- share this (~100KB): logs + info only
+```
+
+`compare/` excludes `src/`, `all_reduce_perf` binary, and `build.log`.
+
+## Source / binary cache (no rebuild every run)
+
+Clone + build live under **`experiments/rccl/.cache/rccl-tests/`** (gitignored),
+not inside each `OUT_DIR`.
+
+| Situation | Behavior |
+|-----------|----------|
+| Binary already in `.cache/.../build/all_reduce_perf` | reuse, skip clone/make |
+| First run / cache empty | clone once + `make MPI=0` |
+| Want a clean rebuild | `FORCE_BUILD=1` |
+| Bring your own binary | `RCCL_TESTS_DIR=/path/to/dir` (must contain `all_reduce_perf`) |
+| Refuse to compile | `SKIP_BUILD=1` (fails if binary missing) |
 
 ## What gets collected (`info/`)
 
@@ -77,10 +102,13 @@ Default (override with env):
 | Var | Default | Meaning |
 |-----|---------|---------|
 | `GPUS` | `4,5,6,7` | visible device list |
-| `OUT_DIR` | `./rccl_bench_<host>_<ts>` | result root |
-| `RCCL_TESTS_DIR` | (build under `OUT_DIR/rccl-tests`) | dir containing `all_reduce_perf` |
-| `RCCL_TESTS_SRC` | clone to `OUT_DIR/src/rccl-tests` | git source override |
-| `SKIP_BUILD` | `0` | set `1` if binary already on `PATH` / `RCCL_TESTS_DIR` |
+| `OUT_DIR` | `results/rccl_bench_<host>_<ts>` | result root |
+| `CACHE_DIR` | `experiments/rccl/.cache/rccl-tests` | shared clone+build tree |
+| `RCCL_TESTS_DIR` | (empty) | dir containing prebuilt `all_reduce_perf` |
+| `RCCL_TESTS_SRC` | `$CACHE_DIR` | git source override |
+| `SKIP_BUILD` | `0` | fail if binary missing (no compile) |
+| `FORCE_BUILD` | `0` | rebuild even when cache hit |
+| `COPY_BINARY` | `0` | also copy binary into `bench/` (off by default) |
 | `SWEEP_ARGS` | see script | override sweep CLI |
 | `FIXED_SIZES` | `1M 4M 16M 64M` | space-separated fixed sizes |
 
