@@ -46,6 +46,7 @@ Perf (--mode perf):
   --perf-concurrencies N   comma-separated max-concurrency values  (default: 4,8,16,32,64)
   --perf-range-ratio F     random length range ratio  (default: 0.8)
   --perf-prompts-per-conc N  num-prompts = concurrency * N  (default: 5)
+  --perf-runs N            repeat each (io,conc) N times  (default: 1)
   --perf-result-dir PATH   output directory  (default: perf_<model>_<mtp|nomtp>_<gpu>_<node>_<ts>)
   --profile                enable torch profiling (output=64 nomtp / 128 mtp, prompts=conc*2)
   --profile-output-dir DIR profile trace directory  (default: profiles)
@@ -82,6 +83,7 @@ PERF_IO_PAIRS_STR="8192:1024"
 PERF_CONCURRENCIES_STR="4,8,16,32,64"
 PERF_RANGE_RATIO="0.8"
 PERF_PROMPTS_PER_CONC="5"
+PERF_RUNS="1"
 PERF_RESULT_DIR=""
 PERF_PROFILE=false
 PERF_PROFILE_OUTPUT_DIR="profiles"
@@ -116,6 +118,7 @@ while [[ $# -gt 0 ]]; do
     --perf-concurrencies) PERF_CONCURRENCIES_STR="$2"; shift 2 ;;
     --perf-range-ratio)  PERF_RANGE_RATIO="$2"; shift 2 ;;
     --perf-prompts-per-conc) PERF_PROMPTS_PER_CONC="$2"; shift 2 ;;
+    --perf-runs)         PERF_RUNS="$2"; shift 2 ;;
     --perf-result-dir)   PERF_RESULT_DIR="$2"; shift 2 ;;
     --profile)           PERF_PROFILE=true; shift ;;
     --profile-output-dir) PERF_PROFILE_OUTPUT_DIR="$2"; shift 2 ;;
@@ -143,11 +146,19 @@ if ! [[ "$ACC_RUNS" =~ ^[1-9][0-9]*$ ]]; then
   bench_die "--acc-runs must be a positive integer (got: '${ACC_RUNS}')"
 fi
 
+if ! [[ "$PERF_RUNS" =~ ^[1-9][0-9]*$ ]]; then
+  bench_die "--perf-runs must be a positive integer (got: '${PERF_RUNS}')"
+fi
+
 if [[ "$PERF_PROFILE" == true ]]; then
   if ! [[ "$PERF_PROFILE_NUM_STEPS" =~ ^[1-9][0-9]*$ ]]; then
     bench_die "--profile-num-steps must be a positive integer (got: '${PERF_PROFILE_NUM_STEPS}')"
   fi
   mkdir -p "$PERF_PROFILE_OUTPUT_DIR" || bench_die "cannot create profile output directory: ${PERF_PROFILE_OUTPUT_DIR}"
+  if [[ "$PERF_RUNS" != "1" ]]; then
+    echo "NOTE: --perf-runs=${PERF_RUNS} ignored with --profile (always 1 run per conc)"
+    PERF_RUNS="1"
+  fi
 fi
 
 if [[ -z "$GPU_VENDOR" ]]; then
@@ -226,13 +237,15 @@ run_perf_sweep() {
   local result_dir="$PERF_RESULT_DIR"
   result_dir="$(cd "$result_dir" && pwd)"
   echo "Writing perf results to: $result_dir"
+  echo "Perf repeats per (io,conc): ${PERF_RUNS}"
 
   run_one() {
-    local ilen=$1 olen=$2 conc=$3
+    local ilen=$1 olen=$2 conc=$3 run_idx=$4
     local run_olen="$olen"
     local run_range_ratio="$PERF_RANGE_RATIO"
     local prompts_per_conc="$PERF_PROMPTS_PER_CONC"
     local nprompts profile_args=() profile_prefix
+    local run_tag="" tag_suffix=""
 
     if [[ "$PERF_PROFILE" == true ]]; then
       run_olen="$PERF_PROFILE_OUTPUT_LEN"
@@ -242,12 +255,19 @@ run_perf_sweep() {
 
     nprompts=$((conc * prompts_per_conc))
     local tag="${ilen}_o${run_olen}_c${conc}"
-    local jsonl="${result_dir}/${TAG}_${tag}.jsonl"
-    local log="${result_dir}/${TAG}_${tag}.log"
+    if (( PERF_RUNS > 1 )); then
+      run_tag="$(printf 'run%03d' "$run_idx")"
+      tag_suffix="_${run_tag}"
+    fi
+    local jsonl="${result_dir}/${TAG}_${tag}${tag_suffix}.jsonl"
+    local log="${result_dir}/${TAG}_${tag}${tag_suffix}.log"
 
     echo
     echo "==================================================================="
     echo ">>> input_len=${ilen}  output_len=${run_olen}  max_concurrency=${conc}  num_prompts=${nprompts}"
+    if (( PERF_RUNS > 1 )); then
+      echo ">>> ${run_tag} (${run_idx}/${PERF_RUNS})"
+    fi
     if [[ "$PERF_PROFILE" == true ]]; then
       profile_prefix="${PERF_PROFILE_PREFIX:-${TAG}_${MODEL_KEY}_${GPU}_i${ilen}_c${conc}}"
       echo ">>> profile_prefix=${profile_prefix}  profile_num_steps=${PERF_PROFILE_NUM_STEPS}"
@@ -275,11 +295,11 @@ run_perf_sweep() {
       --output-file "$jsonl" \
       "${profile_args[@]}" \
       2>&1 | tee "$log"; then
-      bench_die "bench_serving failed for input_len=${ilen} output_len=${run_olen} conc=${conc} (see ${log})"
+      bench_die "bench_serving failed for input_len=${ilen} output_len=${run_olen} conc=${conc}${run_tag:+ ${run_tag}} (see ${log})"
     fi
   }
 
-  local pair ilen olen conc
+  local pair ilen olen conc run_idx
   for pair in "${PERF_IO_PAIRS[@]}"; do
     ilen="${pair%%:*}"
     olen="${pair##*:}"
@@ -290,7 +310,9 @@ run_perf_sweep() {
       if ! [[ "$conc" =~ ^[1-9][0-9]*$ ]]; then
         bench_die "invalid concurrency value '${conc}' in --perf-concurrencies"
       fi
-      run_one "$ilen" "$olen" "$conc"
+      for ((run_idx = 1; run_idx <= PERF_RUNS; run_idx++)); do
+        run_one "$ilen" "$olen" "$conc" "$run_idx"
+      done
     done
   done
 

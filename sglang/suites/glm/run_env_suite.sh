@@ -71,6 +71,8 @@ Options:
   --long-io PAIR               long-ctx perf IO    (default: 70000:300)
   --trace-io PAIR              DECODE profile IO   (default: 8192:1024)
   --long-max-running N         --max-running-requests for long-ctx  (default: 8)
+  --perf-runs N                repeat each perf (io,conc) N times
+                               (default: 1; ignored for profile)
   --phases LIST                stages to run, comma-separated
                                (default: acc,perf,profile,analyze)
                                e.g. --phases profile,analyze
@@ -127,6 +129,7 @@ SHORT_IO="1024:1024,8192:1024"
 LONG_IO="70000:300"
 TRACE_IO="8192:1024"
 LONG_MAX_RUNNING="8"
+PERF_RUNS="1"
 PHASES="acc,perf,profile,analyze"
 WANT_ACC=false
 WANT_PERF=false
@@ -179,6 +182,7 @@ while [[ $# -gt 0 ]]; do
     --long-io)            LONG_IO="$2"; shift 2 ;;
     --trace-io)           TRACE_IO="$2"; shift 2 ;;
     --long-max-running)   LONG_MAX_RUNNING="$2"; shift 2 ;;
+    --perf-runs)          PERF_RUNS="$2"; shift 2 ;;
     --phases)             PHASES="$2"; shift 2 ;;
     --skip-short-ctx)     SKIP_SHORT=true; shift ;;
     --skip-long-ctx)      SKIP_LONG=true; shift ;;
@@ -247,6 +251,11 @@ parse_phases "$PHASES"
 
 if [[ "$ONLY_NOMTP" == true && "$ONLY_MTP" == true ]]; then
   echo "ERROR: --only-nomtp and --only-mtp are mutually exclusive" >&2
+  exit 1
+fi
+
+if ! [[ "$PERF_RUNS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "ERROR: --perf-runs must be a positive integer (got: '${PERF_RUNS}')" >&2
   exit 1
 fi
 
@@ -726,6 +735,19 @@ run_sweep() {
   fi
   if [[ "$mode" == "acc" ]]; then
     sweep_args+=(--acc-host "$HOST" --acc-port "$PORT")
+  fi
+  if [[ "$mode" == "perf" ]]; then
+    local has_profile=false
+    local a
+    for a in "$@"; do
+      if [[ "$a" == "--profile" ]]; then
+        has_profile=true
+        break
+      fi
+    done
+    if [[ "$has_profile" != true ]]; then
+      sweep_args+=(--perf-runs "$PERF_RUNS")
+    fi
   fi
   if ((${#@})); then
     sweep_args+=("$@")
@@ -1229,6 +1251,7 @@ write_manifest() {
     echo "host=${HOST}:${PORT}"
     echo "short_io=${SHORT_IO}"
     echo "long_io=${LONG_IO}"
+    echo "perf_runs=${PERF_RUNS}"
     echo "profile_num_steps=${PROFILE_NUM_STEPS}"
     echo "profile_min_steps=${PROFILE_MIN_STEPS}"
     echo "profile_max_wall_ms=${PROFILE_MAX_WALL_MS}"
@@ -1296,7 +1319,7 @@ main() {
   log "Model=${MODEL}  GPU_VENDOR=${GPU_VENDOR}  GPUS=${GPUS}  TP=${TP}  HOST=${HOST}:${PORT}"
   log "HF_HOME=${HF_HOME}  SGLANG_ROOT=${SGLANG_ROOT}"
   if [[ "$WANT_ACC" == true || "$WANT_PERF" == true ]]; then
-    log "Short IO=${SHORT_IO}  Long IO=${LONG_IO} (max-running-requests=${LONG_MAX_RUNNING})"
+    log "Short IO=${SHORT_IO}  Long IO=${LONG_IO} (max-running-requests=${LONG_MAX_RUNNING})  perf_runs=${PERF_RUNS}"
   fi
   if [[ "$WANT_PROFILE" == true ]]; then
     log "Trace IO=${TRACE_IO}  profile_conc=${PROFILE_CONCURRENCIES}  nocg_conc=${PROFILE_NOCG_CONCURRENCIES} skip_nocg=${SKIP_NOCG_PROFILE}"
